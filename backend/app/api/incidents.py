@@ -6,7 +6,15 @@ from sqlalchemy.orm import Session
 
 from app.agents import graph
 from app.db.base import get_db
-from app.db.models import ApprovalRequest, Incident as IncidentRow, RepairExecution, RepairPlan as RepairPlanRow, ValidationResult
+from app.db.models import (
+    ApprovalRequest,
+    AuditLog,
+    Incident as IncidentRow,
+    IncidentEvent,
+    RepairExecution,
+    RepairPlan as RepairPlanRow,
+    ValidationResult,
+)
 
 router = APIRouter()
 
@@ -66,6 +74,17 @@ def get_incident(incident_id: str, db: Session = Depends(get_db)):
     data["validations"] = [
         {"id": v.id, "passed": v.passed, "checks": v.checks} for v in validations
     ]
+    events = (
+        db.query(IncidentEvent)
+        .filter_by(incident_id=incident_id)
+        .order_by(IncidentEvent.created_at.asc())
+        .all()
+    )
+    data["events"] = [
+        {"id": e.id, "event_type": e.event_type, "payload": e.payload,
+         "created_at": e.created_at.isoformat() if e.created_at else None}
+        for e in events
+    ]
     return data
 
 
@@ -99,5 +118,22 @@ def list_approvals(pending_only: bool = True, db: Session = Depends(get_db)):
     return [
         {"id": r.id, "incident_id": r.incident_id, "plan_id": r.plan_id, "decision": r.decision.value,
          "requested_at": r.requested_at.isoformat()}
+        for r in rows
+    ]
+
+
+@router.get("/audit")
+def list_audit(limit: int = 200, db: Session = Depends(get_db)):
+    rows = db.query(AuditLog).order_by(AuditLog.created_at.desc()).limit(limit).all()
+    return [
+        {
+            "id": r.id,
+            "correlation_id": r.correlation_id,
+            "incident_id": r.incident_id,
+            "actor": r.actor,
+            "action": r.action,
+            "details": r.details,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        }
         for r in rows
     ]

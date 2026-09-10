@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
@@ -24,6 +25,19 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="PipelineMedic AI", version="0.1.0", lifespan=lifespan)
+
+# NOTE: permissive CORS here is for local development only, so a separately
+# served React dashboard (Vite dev server / static container) can call this
+# API from a different origin. This is NOT appropriate for production and is
+# intentionally left out of the "production boundary" hardening doc.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.include_router(incidents_router, tags=["incidents"])
 app.include_router(tools_router, tags=["tools"])
 

@@ -116,10 +116,45 @@ use the standard `postgres:5432`.
 ## API surface
 
 - `GET /health`, `GET /metrics`, `GET /` (status page)
-- `GET /incidents`, `GET /incidents/{id}`
+- `GET /incidents`, `GET /incidents/{id}` (includes plans, approvals, executions, validations, and `incident_events` timeline)
 - `POST /incidents/{id}/approve`, `POST /incidents/{id}/reject`
 - `GET /approvals`
+- `GET /audit` (chronological SYSTEM/AGENT/HUMAN audit trail)
 - `GET /tools` (MCP-style tool catalog with risk levels and JSON schemas)
+
+CORS is enabled permissively (`allow_origins=["*"]`) in `backend/app/main.py`
+for local development only, so the dashboard (a separately served React app)
+can call the API from a different origin. This is not appropriate for
+production and is intentionally excluded from the "production boundary"
+hardening scope.
+
+## Dashboard
+
+A React + TypeScript + Vite dashboard lives in `dashboard/`. It polls the
+live API (every 6-8s) and renders:
+
+- **Overview** — derived pipeline health, active/resolved incident counts, pending approvals, repair success rate
+- **Incidents** — filterable/sortable incident list
+- **Incident Detail** — evidence, diagnosis + confidence, repair plan(s), risk level, approval status, execution result, validation result, and the incident_events timeline
+- **Approvals** — Approve/Reject wired to the real endpoints (Reject requires a typed reason)
+- **Audit Log** — chronological SYSTEM/AGENT/HUMAN feed
+
+Run it standalone against a running backend:
+
+```bash
+cd dashboard
+npm install
+npm run dev          # http://localhost:5173, talks to http://localhost:8000 by default
+```
+
+Or as part of the compose stack:
+
+```bash
+docker compose up -d --build dashboard   # http://localhost:4173
+```
+
+Set `VITE_API_BASE_URL` (dev, via `dashboard/.env`) or `DASHBOARD_API_BASE_URL`
+(compose build arg) to point at a different backend URL.
 
 ## Repository layout
 
@@ -136,6 +171,7 @@ backend/app/
   llm/          provider abstraction (mock / openai / azure_openai)
   observability/ structured logging + Prometheus metrics
   tests/        pytest unit + e2e tests
+dashboard/      React + TypeScript + Vite operator dashboard (see below)
 producer/       Kafka order-event producer with fault-injection scenarios
 flink/jobs/     real PyFlink job (see limitations)
 airflow/dags/   real Airflow DAG
