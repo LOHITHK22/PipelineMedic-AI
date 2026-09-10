@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.runtime_config_state.json
+*.log
+.pytest_cache/
+.idea/
+.vscode/
+node_modules/

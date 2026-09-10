@@ -1,0 +1,48 @@
+# Autonomy policy configuration for PipelineMedic AI.
+# This file is the single source of truth for which tool actions may run
+# automatically, which require human approval, and which are hard-blocked.
+# The policy engine (app/policies/engine.py) loads this file; no autonomy
+# decision is made via scattered if-statements in application code.
+
+tool_risk:
+  get_kafka_consumer_lag: LOW
+  get_topic_metadata: LOW
+  get_recent_pipeline_errors: LOW
+  get_flink_job_status: LOW
+  get_airflow_dag_status: LOW
+  get_airflow_task_logs: LOW
+  get_database_schema: LOW
+  get_schema_versions: LOW
+  compare_schema_versions: LOW
+  validate_pipeline_health: LOW
+  quarantine_message: LOW
+  request_human_approval: LOW
+  rerun_airflow_task: MEDIUM
+  restart_flink_job: MEDIUM
+  change_flink_parallelism: MEDIUM
+  apply_safe_config_patch: MEDIUM
+  rollback_change: MEDIUM
+  drop_database_table: CRITICAL
+  truncate_topic: CRITICAL
+  delete_dag: CRITICAL
+  run_arbitrary_sql: CRITICAL
+  run_shell_command: CRITICAL
+
+# Overall incident-level autonomy decision by (incident risk level).
+# LOW  -> AUTO_EXECUTE   (fully automatic, no human involved)
+# MEDIUM/HIGH -> APPROVAL_REQUIRED (persisted ApprovalRequest, agent pauses)
+# CRITICAL -> BLOCKED (never auto or approval-executed; requires manual out-of-band action)
+autonomy_by_risk:
+  LOW: AUTO_EXECUTE
+  MEDIUM: APPROVAL_REQUIRED
+  HIGH: APPROVAL_REQUIRED
+  CRITICAL: BLOCKED
+
+# Actions that are hard-blocked in code regardless of policy file contents
+# (defense in depth -- see app/tools/registry.py CRITICAL_HARD_BLOCK).
+hard_blocked_tools:
+  - drop_database_table
+  - truncate_topic
+  - delete_dag
+  - run_arbitrary_sql
+  - run_shell_command
