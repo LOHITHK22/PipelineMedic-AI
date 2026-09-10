@@ -23,9 +23,11 @@ import os
 
 from pyflink.common import Types
 from pyflink.common.serialization import SimpleStringSchema
+from pyflink.common.watermark_strategy import WatermarkStrategy
 from pyflink.datastream import StreamExecutionEnvironment
+from pyflink.datastream.connectors.base import DeliveryGuarantee
 from pyflink.datastream.connectors.kafka import (
-    FlinkKafkaConsumer, FlinkKafkaProducer,
+    KafkaSource, KafkaOffsetsInitializer, KafkaSink, KafkaRecordSerializationSchema,
 )
 
 REQUIRED_FIELDS = {"event_id", "order_id", "customer_id", "amount", "currency", "event_time"}
@@ -66,14 +68,17 @@ def main():
     env = StreamExecutionEnvironment.get_execution_environment()
     env.set_parallelism(int(os.environ.get("FLINK_PARALLELISM", "2")))
 
-    consumer = FlinkKafkaConsumer(
-        topics="orders.raw",
-        deserialization_schema=SimpleStringSchema(),
-        properties={"bootstrap.servers": BOOTSTRAP, "group.id": "flink-order-validator"},
+    source = (
+        KafkaSource.builder()
+        .set_bootstrap_servers(BOOTSTRAP)
+        .set_topics("orders.raw")
+        .set_group_id("flink-order-validator")
+        .set_starting_offsets(KafkaOffsetsInitializer.latest())
+        .set_value_only_deserializer(SimpleStringSchema())
+        .build()
     )
-    consumer.set_start_from_latest()
 
-    raw_stream = env.add_source(consumer)
+    raw_stream = env.from_source(source, WatermarkStrategy.no_watermarks(), "orders-raw-source")
     tagged = raw_stream.map(route, output_type=Types.STRING())
 
     valid_stream = tagged.filter(lambda s: s.startswith("VALID:")).map(
@@ -83,17 +88,33 @@ def main():
         lambda s: s[len("INVALID:"):], output_type=Types.STRING()
     )
 
-    valid_producer = FlinkKafkaProducer(
-        topic="orders.validated", serialization_schema=SimpleStringSchema(),
-        producer_config={"bootstrap.servers": BOOTSTRAP},
+    valid_sink = (
+        KafkaSink.builder()
+        .set_bootstrap_servers(BOOTSTRAP)
+        .set_record_serializer(
+            KafkaRecordSerializationSchema.builder()
+            .set_topic("orders.validated")
+            .set_value_serialization_schema(SimpleStringSchema())
+            .build()
+        )
+        .set_delivery_guarantee(DeliveryGuarantee.AT_LEAST_ONCE)
+        .build()
     )
-    dlq_producer = FlinkKafkaProducer(
-        topic="pipeline.dlq", serialization_schema=SimpleStringSchema(),
-        producer_config={"bootstrap.servers": BOOTSTRAP},
+    dlq_sink = (
+        KafkaSink.builder()
+        .set_bootstrap_servers(BOOTSTRAP)
+        .set_record_serializer(
+            KafkaRecordSerializationSchema.builder()
+            .set_topic("pipeline.dlq")
+            .set_value_serialization_schema(SimpleStringSchema())
+            .build()
+        )
+        .set_delivery_guarantee(DeliveryGuarantee.AT_LEAST_ONCE)
+        .build()
     )
 
-    valid_stream.add_sink(valid_producer)
-    invalid_stream.add_sink(dlq_producer)
+    valid_stream.sink_to(valid_sink)
+    invalid_stream.sink_to(dlq_sink)
 
     env.execute("pipelinemedic-order-validator")
 

@@ -63,29 +63,31 @@ just written:
   (`backend/app/tests/test_e2e.py`) exercising the full lifecycle described
   above via the same service functions the API uses.
 
-**Known limitations (see `docs/limitations.md` for full detail and exact
-next commands):**
+**Flink and Airflow are real and verified too** (see `docs/limitations.md`
+for the exact bugs found and fixed, and `docs/demo.md` for the commands):
 
-- **PyFlink job** (`flink/jobs/order_validator_job.py`): real, complete
-  PyFlink DataStream code is provided, along with a custom Dockerfile
-  (`flink/Dockerfile`) that installs `apache-flink` + the Kafka connector
-  jar into the official Flink image. It was **not submitted and run** in
-  this session -- PyFlink's Python/JVM bridge has a fragile, multi-version
-  dependency chain that needs local iteration time this session's budget
-  did not allow after the core system was fully verified. **Fallback that
-  IS running**: `backend/app/services/pipeline_monitor.py` runs the exact
-  same validation rules as a background thread inside the FastAPI process,
-  consuming `orders.raw` and producing to `orders.validated` /
-  `pipeline.dlq` -- this is what powered the live detection runs above.
-- **Airflow**: a real DAG (`airflow/dags/order_data_quality_dag.py`) and
-  fault-injection script (`scripts/inject_airflow_failure.py`) are provided
-  and the `docker-compose.yml` `full` profile brings up Airflow
-  webserver/scheduler. Airflow's own Postgres migration + webserver startup
-  is heavy (multi-minute cold start) and was not run to completion in this
-  session's time budget; the DAG code itself follows standard, testable
-  Airflow patterns (`PythonOperator`, `psycopg2` against the shared
-  Postgres) and the `AirflowFailureDetector` + `rerun_airflow_task` tool
-  that consume its output are implemented and unit-tested.
+- **PyFlink job** (`flink/jobs/order_validator_job.py`): runs as a real
+  DataStream job (`KafkaSource` -> validate -> `KafkaSink` to
+  `orders.validated`/`pipeline.dlq`) on a real Flink JobManager/TaskManager
+  cluster (`docker compose --profile full up --build`), auto-submitted by
+  the `flink-job-submitter` service. Verified by feeding a valid and a
+  poison record into `orders.raw` and confirming they land in
+  `orders.validated` and `pipeline.dlq` respectively, plus continuously
+  processing the live `producer` container's traffic.
+- **Airflow**: `airflow-webserver` + `airflow-scheduler` run against a
+  dedicated `airflow` Postgres database; `order_data_quality_dag` is picked
+  up by the scheduler and was triggered via the REST API end to end,
+  including the failure path (`scripts/inject_airflow_failure.py` breaking
+  the `orders` table's schema, the DAG run failing as expected, repairing
+  it, and a rerun succeeding). `backend/app/services/pipeline_monitor.py`
+  polls the real Flink and Airflow REST APIs on background threads and
+  raises real `FLINK_FAILURE`/`AIRFLOW_FAILURE` incidents into the same
+  agent graph -- observed live producing an `AIRFLOW_FAILURE` incident at
+  `GET /incidents` from the injected failure above.
+- Set `PIPELINE_MONITOR_STREAM_VALIDATOR_ENABLED=false` when running the
+  `full` profile so the Python fallback validator doesn't also consume
+  `orders.raw` alongside the real Flink job (it remains the default,
+  lighter-weight path for environments that only run the core profile).
 - **LLM providers other than mock**: `openai`/`azure_openai` are fully
   coded against structured outputs but require API keys not available here;
   only `LLM_PROVIDER=mock` is verified end-to-end (as the task required).

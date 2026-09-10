@@ -32,6 +32,13 @@ class Settings(BaseSettings):
 
     # Flink (optional integration)
     flink_jobmanager_url: str = "http://flink-jobmanager:8081"
+    # When a real Flink job is running the orders.raw -> orders.validated/dlq
+    # validation (see flink/jobs/order_validator_job.py), set this to false so
+    # PipelineMonitor's in-process "stream-validator" thread does not also
+    # consume orders.raw and double-write validated/dlq records. Defaults to
+    # true (the lightweight fallback path) for constrained environments where
+    # the Flink cluster isn't brought up.
+    pipeline_monitor_stream_validator_enabled: bool = True
 
     # App
     app_env: str = "development"

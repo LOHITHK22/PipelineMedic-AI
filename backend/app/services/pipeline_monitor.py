@@ -25,6 +25,8 @@ from app.config import settings
 from app.detectors.data_quality import DataQualityDetector, REQUIRED_FIELDS
 from app.detectors.kafka_lag import KafkaLagDetector
 from app.detectors.schema_drift import SchemaDriftDetector, diff_schemas
+from app.detectors.airflow_failure import AirflowFailureDetector
+from app.detectors.flink_failure import FlinkFailureDetector
 from app.agents.graph import receive_incident
 from app.models.schemas import CompatibilityClass, IncidentType, Severity
 from app.db.base import SessionLocal
@@ -59,15 +61,33 @@ class PipelineMonitor:
         self._threads: list[threading.Thread] = []
         self.dq_detector = DataQualityDetector()
         self.lag_detector = KafkaLagDetector()
+        self.airflow_detector = AirflowFailureDetector()
+        self.flink_detector = FlinkFailureDetector()
+        self._seen_airflow_failures: set[str] = set()
 
     def start(self):
         _ensure_baseline_schema_version()
-        t1 = threading.Thread(target=self._run_stream_validator, daemon=True, name="stream-validator")
+        self._threads = []
+        if settings.pipeline_monitor_stream_validator_enabled:
+            t1 = threading.Thread(target=self._run_stream_validator, daemon=True, name="stream-validator")
+            t1.start()
+            self._threads.append(t1)
+        else:
+            logger.info(
+                "stream-validator thread disabled (pipeline_monitor_stream_validator_enabled=false); "
+                "expecting the real Flink job to own orders.raw -> orders.validated/dlq validation."
+            )
         t2 = threading.Thread(target=self._run_lag_monitor, daemon=True, name="lag-monitor")
-        t1.start()
         t2.start()
-        self._threads = [t1, t2]
-        logger.info("PipelineMonitor started (stream-validator + lag-monitor)")
+        self._threads.append(t2)
+        t3 = threading.Thread(target=self._run_flink_health_monitor, daemon=True, name="flink-health-monitor")
+        t3.start()
+        self._threads.append(t3)
+        t4 = threading.Thread(target=self._run_airflow_health_monitor, daemon=True, name="airflow-health-monitor")
+        t4.start()
+        self._threads.append(t4)
+        logger.info("PipelineMonitor started (stream-validator=%s + lag-monitor + flink-health-monitor + airflow-health-monitor)",
+                    settings.pipeline_monitor_stream_validator_enabled)
 
     def stop(self):
         self._stop.set()
@@ -181,6 +201,74 @@ class PipelineMonitor:
             except Exception as e:
                 logger.warning("Lag monitor iteration failed: %s", e)
             time.sleep(settings.consumer_poll_interval_seconds * 5)
+
+    # ---- periodic Flink job health monitor (real JobManager REST API, with
+    # graceful no-op if the "full" profile's Flink cluster isn't running) ----
+
+    def _run_flink_health_monitor(self):
+        time.sleep(15)  # let a real Flink cluster / job submission settle first
+        from app.tools.flink_tools import GetFlinkJobStatusTool, GetFlinkJobStatusInput
+
+        tool = GetFlinkJobStatusTool()
+        while not self._stop.is_set():
+            try:
+                result = tool._execute(GetFlinkJobStatusInput(job_name="pipelinemedic-order-validator"))
+                if result.state in ("UNREACHABLE", "UNKNOWN"):
+                    # Flink's "full" profile isn't up in this environment (or the
+                    # job hasn't been submitted yet) -- nothing to detect against,
+                    # not an error. The Python fallback validator covers this case.
+                    pass
+                else:
+                    incident = self.flink_detector.detect(
+                        job_id=result.job_id or "unknown",
+                        job_name="pipelinemedic-order-validator",
+                        state=result.state,
+                        restart_count=result.restart_count,
+                        exceptions=result.exceptions,
+                    )
+                    if incident:
+                        receive_incident(incident)
+            except Exception as e:
+                logger.warning("Flink health monitor iteration failed: %s", e)
+            time.sleep(20)
+
+    # ---- periodic Airflow DAG health monitor (real webserver REST API, with
+    # graceful no-op if the "full" profile's Airflow isn't running) ----
+
+    def _run_airflow_health_monitor(self):
+        time.sleep(15)
+        from app.tools.airflow_tools import GetAirflowDagStatusTool, GetAirflowDagStatusInput
+
+        tool = GetAirflowDagStatusTool()
+        dag_id = "order_data_quality_dag"
+        while not self._stop.is_set():
+            try:
+                result = tool._execute(GetAirflowDagStatusInput(dag_id=dag_id))
+                if result.error or result.latest_run_state is None:
+                    # Airflow's "full" profile isn't up in this environment --
+                    # nothing to detect against, not an error.
+                    pass
+                elif result.latest_run_state in ("failed", "upstream_failed"):
+                    discriminator = f"{dag_id}:{result.latest_run_state}"
+                    if discriminator not in self._seen_airflow_failures:
+                        self._seen_airflow_failures.add(discriminator)
+                        incident = self.airflow_detector.detect(
+                            dag_id=dag_id,
+                            task_id="check_orders_schema",
+                            run_id="latest",
+                            state=result.latest_run_state,
+                            try_number=1,
+                            logs_tail="(fetch via get_airflow_task_logs tool for full logs)",
+                        )
+                        if incident:
+                            receive_incident(incident)
+                else:
+                    # Latest run recovered; allow a future failure to raise again.
+                    self._seen_airflow_failures.discard(f"{dag_id}:failed")
+                    self._seen_airflow_failures.discard(f"{dag_id}:upstream_failed")
+            except Exception as e:
+                logger.warning("Airflow health monitor iteration failed: %s", e)
+            time.sleep(20)
 
 
 monitor = PipelineMonitor()

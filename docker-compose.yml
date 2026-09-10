@@ -1,5 +1,3 @@
-version: "3.8"
-
 x-airflow-common: &airflow-common
   image: apache/airflow:2.9.3-python3.11
   environment:
@@ -8,9 +6,20 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
     AIRFLOW__CORE__DEFAULT_TIMEZONE: utc
-    PIPELINEMEDIC_DB_URL: postgresql+psycopg2://pipelinemedic:pipelinemedic@postgres:5432/pipelinemedic
+    AIRFLOW__WEBSERVER__SECRET_KEY: "pipelinemedic-demo-secret-key"
+    AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth"
+    # The DAG (airflow/dags/order_data_quality_dag.py) and
+    # scripts/inject_airflow_failure.py both read PIPELINEMEDIC_DB_DSN
+    # (a libpq DSN string, not a SQLAlchemy URL) to connect to the
+    # pipelinemedic app database (a different DB than Airflow's own
+    # metadata DB above) via psycopg2.
+    PIPELINEMEDIC_DB_DSN: "dbname=pipelinemedic user=pipelinemedic password=pipelinemedic host=postgres port=5432"
+    # The official Airflow image ships without psycopg2; the DAG needs it
+    # to talk to the pipelinemedic Postgres database directly.
+    _PIP_ADDITIONAL_REQUIREMENTS: "psycopg2-binary==2.9.9"
   volumes:
     - ./airflow/dags:/opt/airflow/dags
+    - airflow_logs:/opt/airflow/logs
   depends_on:
     postgres:
       condition: service_healthy
@@ -82,6 +91,10 @@ services:
       LLM_PROVIDER: ${LLM_PROVIDER:-mock}
       AIRFLOW_BASE_URL: http://airflow-webserver:8080
       FLINK_JOBMANAGER_URL: http://flink-jobmanager:8081
+      # Set to "false" when running `--profile full` with a real Flink job
+      # submitted (see flink-job-submitter), so the Python fallback validator
+      # doesn't double-consume orders.raw alongside the real Flink job.
+      PIPELINE_MONITOR_STREAM_VALIDATOR_ENABLED: ${PIPELINE_MONITOR_STREAM_VALIDATOR_ENABLED:-true}
     depends_on:
       postgres:
         condition: service_healthy
@@ -103,24 +116,52 @@ services:
   # ---- Flink: real jobmanager/taskmanager cluster. See docs/limitations in
   # README for status of the PyFlink job submission in this environment.
   flink-jobmanager:
-    image: flink:1.18-scala_2.12-java11
+    image: pipelinemedic-flink
     command: jobmanager
     ports:
       - "8081:8081"
     environment:
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: flink-jobmanager
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8081/overview || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    depends_on:
+      kafka-topic-init:
+        condition: service_completed_successfully
     profiles: ["full"]
 
   flink-taskmanager:
-    image: flink:1.18-scala_2.12-java11
+    image: pipelinemedic-flink
     command: taskmanager
     depends_on:
-      - flink-jobmanager
+      flink-jobmanager:
+        condition: service_healthy
     environment:
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: flink-jobmanager
         taskmanager.numberOfTaskSlots: 2
+    profiles: ["full"]
+
+  flink-job-submitter:
+    image: pipelinemedic-flink
+    entrypoint: ["/bin/bash", "-c"]
+    command: >
+      "
+      until curl -sf http://flink-jobmanager:8081/overview; do echo waiting for jobmanager; sleep 3; done &&
+      flink run -d -py /opt/flink/jobs/order_validator_job.py -m flink-jobmanager:8081
+      "
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      flink-jobmanager:
+        condition: service_healthy
+      flink-taskmanager:
+        condition: service_started
+      kafka-topic-init:
+        condition: service_completed_successfully
     profiles: ["full"]
 
   airflow-init:
@@ -136,17 +177,25 @@ services:
     command: webserver
     ports:
       - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 30
     depends_on:
-      - airflow-init
+      airflow-init:
+        condition: service_completed_successfully
     profiles: ["full"]
 
   airflow-scheduler:
     <<: *airflow-common
     command: scheduler
     depends_on:
-      - airflow-init
+      airflow-init:
+        condition: service_completed_successfully
     profiles: ["full"]
 
 volumes:
   kafka_data:
   pg_data:
+  airflow_logs:

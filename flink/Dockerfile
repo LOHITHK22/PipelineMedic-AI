@@ -11,8 +11,21 @@ RUN apt-get update && \
 
 RUN pip3 install --no-cache-dir apache-flink==1.18.1
 
-# Kafka SQL/DataStream connector jar (matches Flink 1.18 + Kafka client 3.x)
-ADD https://repo1.maven.org/maven2/org/apache/flink/flink-sql-connector-kafka/3.1.0-1.18/flink-sql-connector-kafka-3.1.0-1.18.jar \
-    /opt/flink/lib/flink-sql-connector-kafka-3.1.0-1.18.jar
+# Kafka DataStream connector jar (org.apache.flink.connector.kafka.source/sink.*
+# classes used by KafkaSource/KafkaSink in the PyFlink job) plus its kafka-clients
+# dependency. NOTE: flink-sql-connector-kafka (the "sql" jar) only relocates/shades
+# the Table/SQL API classes and does NOT provide the DataStream KafkaSource/KafkaSink
+# classes -- using it alone fails at job-graph init with
+# "ClassNotFoundException: org.apache.flink.connector.kafka.source.KafkaSource".
+ADD https://repo1.maven.org/maven2/org/apache/flink/flink-connector-kafka/3.1.0-1.18/flink-connector-kafka-3.1.0-1.18.jar \
+    /opt/flink/lib/flink-connector-kafka-3.1.0-1.18.jar
+ADD https://repo1.maven.org/maven2/org/apache/kafka/kafka-clients/3.4.0/kafka-clients-3.4.0.jar \
+    /opt/flink/lib/kafka-clients-3.4.0.jar
+# Docker ADD from a URL creates the file as root:root mode 0600, which the
+# non-root "flink" user (the container's runtime user) cannot read -- this
+# silently manifests as ClassNotFoundException for the connector classes at
+# job-graph init time, not as a permissions error. Fix ownership/mode.
+RUN chown flink:flink /opt/flink/lib/flink-connector-kafka-3.1.0-1.18.jar /opt/flink/lib/kafka-clients-3.4.0.jar && \
+    chmod 644 /opt/flink/lib/flink-connector-kafka-3.1.0-1.18.jar /opt/flink/lib/kafka-clients-3.4.0.jar
 
 COPY jobs /opt/flink/jobs
