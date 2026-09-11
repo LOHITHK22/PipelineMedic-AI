@@ -159,6 +159,16 @@ h2 {
   color: #b93a3a;
 }
 
+.stat-card .stat-value.unknown {
+  color: var(--text-dim);
+}
+
+.stat-card .stat-sublabel {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
 .card {
   background: var(--bg-card);
   border: 1px solid var(--border);

@@ -12,7 +12,7 @@ import uuid
 
 from app.agents import graph
 from app.db.base import SessionLocal
-from app.db.models import Incident as IncidentRow, IncidentStatus
+from app.db.models import Incident as IncidentRow, IncidentEvent, IncidentStatus
 from app.detectors.base import build_incident
 from app.models.schemas import IncidentType, Severity
 from app.tools import registry as tool_registry
@@ -66,6 +66,30 @@ def test_schema_drift_full_lifecycle(clean_db, monkeypatch):
         row = db.query(IncidentRow).get(incident_id)
         assert row.status == IncidentStatus.RESOLVED
         assert row.resolved_at is not None
+
+        # Gap-1 regression test: every real lifecycle transition must produce
+        # an incident_events row, enforced centrally in app/agents/graph.py so
+        # it can't be missed for any current or future detector type.
+        events = (
+            db.query(IncidentEvent)
+            .filter_by(incident_id=incident_id)
+            .order_by(IncidentEvent.created_at.asc())
+            .all()
+        )
+        event_types = [e.event_type for e in events]
+        assert event_types == [
+            "INCIDENT_DETECTED",
+            "CONTEXT_COLLECTED",
+            "DIAGNOSIS_CREATED",
+            "REPAIR_PLAN_CREATED",
+            "APPROVAL_REQUESTED",
+            "HUMAN_APPROVED",
+            "REPAIR_STARTED",
+            "REPAIR_COMPLETED",
+            "VALIDATION_STARTED",
+            "VALIDATION_PASSED",
+            "INCIDENT_RESOLVED",
+        ]
     finally:
         db.close()
 

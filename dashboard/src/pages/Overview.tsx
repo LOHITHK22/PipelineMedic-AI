@@ -1,7 +1,7 @@
 import { useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 import { usePolling } from "../hooks/usePolling";
-import type { ApprovalListItem, Incident } from "../api/types";
+import type { ApprovalListItem, Incident, PipelineHealth } from "../api/types";
 
 const ACTIVE_STATUSES = new Set([
   "DETECTED",
@@ -14,11 +14,12 @@ const ACTIVE_STATUSES = new Set([
 const RESOLVED_LIKE = new Set(["RESOLVED", "ROLLED_BACK"]);
 
 async function fetchOverviewData() {
-  const [incidents, approvals] = await Promise.all([
+  const [incidents, approvals, pipelineHealth] = await Promise.all([
     api.listIncidents(),
     api.listApprovals(true),
+    api.pipelineHealth(),
   ]);
-  return { incidents, approvals };
+  return { incidents, approvals, pipelineHealth };
 }
 
 function computeStats(incidents: Incident[], approvals: ApprovalListItem[]) {
@@ -28,19 +29,11 @@ function computeStats(incidents: Incident[], approvals: ApprovalListItem[]) {
   const attempted = resolved + failed;
   const successRate = attempted > 0 ? Math.round((resolved / attempted) * 100) : null;
 
-  // Pipeline health: degraded if any CRITICAL/HIGH severity incident is currently
-  // unresolved, healthy otherwise. Derived from real incident data (no Flink/Airflow
-  // health endpoint is exposed by the API today).
-  const degraded = incidents.some(
-    (i) => ACTIVE_STATUSES.has(i.status) && (i.severity === "CRITICAL" || i.severity === "HIGH"),
-  );
-
   return {
     active,
     resolved,
     pending: approvals.length,
     successRate,
-    degraded,
   };
 }
 
@@ -60,12 +53,27 @@ export function Overview() {
         <>
           {(() => {
             const stats = computeStats(data.incidents, data.approvals);
+            const health = data.pipelineHealth;
+            const statusLabel: Record<PipelineHealth["overall"], string> = {
+              HEALTHY: "Healthy",
+              DEGRADED: "Degraded",
+              UNKNOWN: "Unknown",
+            };
+            const statusClass: Record<PipelineHealth["overall"], string> = {
+              HEALTHY: "healthy",
+              DEGRADED: "degraded",
+              UNKNOWN: "unknown",
+            };
             return (
               <div className="stat-grid">
                 <div className="stat-card">
                   <div className="stat-label">Pipeline Status</div>
-                  <div className={`stat-value ${stats.degraded ? "degraded" : "healthy"}`}>
-                    {stats.degraded ? "Degraded" : "Healthy"}
+                  <div className={`stat-value ${statusClass[health.overall]}`}>
+                    {statusLabel[health.overall]}
+                  </div>
+                  <div className="stat-sublabel">
+                    Flink: {health.flink.state} · Airflow:{" "}
+                    {health.airflow.latest_run_state ?? (health.airflow.error ? "unreachable" : "n/a")}
                   </div>
                 </div>
                 <div className="stat-card">

@@ -80,3 +80,39 @@ demo scenarios.
    rollback and marks it `ROLLED_BACK`.
 10. Every tool call, human decision, and state transition is written to
     `audit_log` with `correlation_id`/`incident_id` for tracing.
+
+### Incident lifecycle events (`incident_events`)
+
+In addition to the free-form `audit_log`, every real lifecycle transition
+also writes a canonical `IncidentEvent` row via the `_event()` helper in
+`agents/graph.py`. This is what powers the dashboard's Incident Detail
+timeline. The event types are: `INCIDENT_DETECTED`, `CONTEXT_COLLECTED`,
+`DIAGNOSIS_CREATED`, `REPAIR_PLAN_CREATED`, `APPROVAL_REQUESTED`,
+`HUMAN_APPROVED` / `HUMAN_REJECTED`, `REPAIR_STARTED`, `REPAIR_COMPLETED` /
+`REPAIR_FAILED`, `VALIDATION_STARTED`, `VALIDATION_PASSED` /
+`VALIDATION_FAILED`, and `INCIDENT_RESOLVED` / `INCIDENT_ROLLED_BACK` /
+`INCIDENT_BLOCKED`.
+
+This is enforced centrally in the graph/state-machine functions
+(`receive_incident`, `_run_until_decision`, `approve_incident`,
+`reject_incident`, `_execute_and_validate`) rather than in each detector, so
+every incident -- regardless of detector type (`KAFKA_LAG`, `SCHEMA_DRIFT`,
+`POISON_MESSAGE`, `AIRFLOW_FAILURE`, `FLINK_FAILURE`, `DATA_QUALITY`, or any
+future type) -- automatically gets a fully populated timeline without a
+detector author having to remember to write events themselves. See
+`backend/app/tests/test_e2e.py::test_schema_drift_full_lifecycle` for a
+regression test asserting the exact event sequence for a full auto-execute
+lifecycle.
+
+## Pipeline component health (`GET /health/pipeline`)
+
+`backend/app/api/health.py` exposes real-time Flink + Airflow health by
+calling the same tools the agent graph uses for diagnosis
+(`get_flink_job_status`, `get_airflow_dag_status`) against the live Flink
+JobManager and Airflow REST APIs on every request -- it does not cache or
+infer from incident data. Each component reports `HEALTHY` / `DEGRADED` /
+`UNKNOWN` (`UNKNOWN` means that component isn't running in this compose
+profile, not that it's failed), and `overall` is `DEGRADED` if either
+component is, `HEALTHY` if both are, else `UNKNOWN`. The dashboard's Overview
+page (`dashboard/src/pages/Overview.tsx`) consumes this endpoint directly
+instead of inferring pipeline health from incident severity.

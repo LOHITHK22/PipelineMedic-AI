@@ -125,6 +125,32 @@ export interface ApprovalListItem {
   requested_at: string;
 }
 
+export type ComponentHealthStatus = "HEALTHY" | "DEGRADED" | "UNKNOWN";
+
+export interface FlinkHealth {
+  job_id: string | null;
+  job_name: string;
+  state: string;
+  restart_count: number;
+  exceptions: string[];
+  error: string | null;
+  status: ComponentHealthStatus;
+}
+
+export interface AirflowHealth {
+  dag_id: string;
+  is_paused: boolean | null;
+  latest_run_state: string | null;
+  error: string | null;
+  status: ComponentHealthStatus;
+}
+
+export interface PipelineHealth {
+  overall: ComponentHealthStatus;
+  flink: FlinkHealth;
+  airflow: AirflowHealth;
+}
+
 export interface AuditLogEntry {
   id: string;
   correlation_id: string;

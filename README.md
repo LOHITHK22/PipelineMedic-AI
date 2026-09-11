@@ -116,6 +116,11 @@ use the standard `postgres:5432`.
 ## API surface
 
 - `GET /health`, `GET /metrics`, `GET /` (status page)
+- `GET /health/pipeline` — live Flink JobManager + Airflow REST API health (not
+  derived from incident severity): `{overall, flink: {state, status, ...},
+  airflow: {latest_run_state, status, ...}}` where `status` is
+  `HEALTHY`/`DEGRADED`/`UNKNOWN` per component (`UNKNOWN` means that
+  component isn't running in this profile, not that it's broken)
 - `GET /incidents`, `GET /incidents/{id}` (includes plans, approvals, executions, validations, and `incident_events` timeline)
 - `POST /incidents/{id}/approve`, `POST /incidents/{id}/reject`
 - `GET /approvals`
@@ -133,9 +138,9 @@ hardening scope.
 A React + TypeScript + Vite dashboard lives in `dashboard/`. It polls the
 live API (every 6-8s) and renders:
 
-- **Overview** — derived pipeline health, active/resolved incident counts, pending approvals, repair success rate
+- **Overview** — real Flink/Airflow health from `GET /health/pipeline`, active/resolved incident counts, pending approvals, repair success rate
 - **Incidents** — filterable/sortable incident list
-- **Incident Detail** — evidence, diagnosis + confidence, repair plan(s), risk level, approval status, execution result, validation result, and the incident_events timeline
+- **Incident Detail** — evidence, diagnosis + confidence, repair plan(s), risk level, approval status, execution result, validation result, and the incident_events timeline (populated for every incident type — see "Incident lifecycle events" below)
 - **Approvals** — Approve/Reject wired to the real endpoints (Reject requires a typed reason)
 - **Audit Log** — chronological SYSTEM/AGENT/HUMAN feed
 

@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
+from app.api.health import router as health_router
 from app.api.incidents import router as incidents_router
 from app.api.tools import router as tools_router
 from app.config import settings
@@ -40,6 +41,7 @@ app.add_middleware(
 
 app.include_router(incidents_router, tags=["incidents"])
 app.include_router(tools_router, tags=["tools"])
+app.include_router(health_router, tags=["health"])
 
 
 @app.get("/health")

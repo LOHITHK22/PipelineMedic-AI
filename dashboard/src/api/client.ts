@@ -3,6 +3,7 @@ import type {
   AuditLogEntry,
   Incident,
   IncidentDetail,
+  PipelineHealth,
 } from "./types";
 
 export const API_BASE_URL: string =
@@ -50,6 +51,8 @@ export const api = {
   listAudit: (limit = 200) => request<AuditLogEntry[]>(`/audit?limit=${limit}`),
 
   health: () => request<{ status: string; llm_provider: string }>("/health"),
+
+  pipelineHealth: () => request<PipelineHealth>("/health/pipeline"),
 
   metricsText: async (): Promise<string> => {
     const res = await fetch(`${API_BASE_URL}/metrics`);

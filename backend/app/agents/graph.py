@@ -23,8 +23,8 @@ from app.agents.context_collector import collect_context
 from app.agents.state import AgentNode, AgentState
 from app.db.base import SessionLocal
 from app.db.models import (
-    ApprovalDecision, ApprovalRequest, AuditLog, Incident as IncidentRow, IncidentStatus,
-    RepairExecution, RiskLevel as DBRiskLevel, ValidationResult,
+    ApprovalDecision, ApprovalRequest, AuditLog, Incident as IncidentRow, IncidentEvent,
+    IncidentStatus, RepairExecution, RiskLevel as DBRiskLevel, ValidationResult,
 )
 from app.llm.provider import get_llm_provider
 from app.models.schemas import AutonomyDecision, Incident, RiskLevel
@@ -41,6 +41,19 @@ logger = logging.getLogger("pipelinemedic.agent")
 
 def _audit(db, correlation_id, incident_id, actor, action, details):
     db.add(AuditLog(correlation_id=correlation_id, incident_id=incident_id, actor=actor, action=action, details=details))
+
+
+def _event(db, incident_id, event_type, payload=None):
+    """Write a canonical incident_events row for the dashboard timeline.
+
+    This is the single, centrally-enforced place lifecycle events are recorded.
+    Every detector type funnels through the same graph functions below, so a
+    future detector automatically gets a populated timeline without having to
+    remember to call this itself -- unlike `_audit`, which is a free-form
+    engineering log, `_event` is reserved for the fixed set of real lifecycle
+    transitions (INCIDENT_DETECTED, CONTEXT_COLLECTED, DIAGNOSIS_CREATED, ...).
+    """
+    db.add(IncidentEvent(incident_id=incident_id, event_type=event_type, payload=payload or {}))
 
 
 def receive_incident(incident: Incident) -> str:
@@ -70,6 +83,12 @@ def receive_incident(incident: Incident) -> str:
         incident.id = row.id
         PIPELINE_INCIDENTS_TOTAL.labels(incident_type=incident.incident_type.value).inc()
         _audit(db, incident.correlation_id, row.id, "system", "incident_received", {"dedup_key": incident.dedup_key})
+        _event(db, row.id, "INCIDENT_DETECTED", {
+            "incident_type": incident.incident_type.value,
+            "severity": incident.severity.value,
+            "source_component": incident.source_component,
+            "title": incident.title,
+        })
         db.commit()
     finally:
         db.close()
@@ -87,6 +106,8 @@ def _run_until_decision(incident: Incident):
 
         # collect_context
         context = collect_context(incident)
+        _event(db, row.id, "CONTEXT_COLLECTED", {"context_keys": list(context.keys())})
+        db.commit()
 
         # diagnose
         provider = get_llm_provider()
@@ -95,11 +116,15 @@ def _run_until_decision(incident: Incident):
         AGENT_DIAGNOSIS_DURATION.observe(time.time() - start)
         row.diagnosis = diagnosis.model_dump()
         _audit(db, incident.correlation_id, row.id, "agent", "diagnosis_complete", diagnosis.model_dump())
+        _event(db, row.id, "DIAGNOSIS_CREATED", diagnosis.model_dump())
+        db.commit()
 
         # generate_repair_plan
         plan = provider.generate_repair_plan(incident, diagnosis, context)
         plan.incident_id = row.id
         _audit(db, incident.correlation_id, row.id, "agent", "repair_plan_generated", plan.model_dump())
+        _event(db, row.id, "REPAIR_PLAN_CREATED", plan.model_dump())
+        db.commit()
 
         # calculate_risk
         risk = assess_risk(plan, incident.severity)
@@ -121,6 +146,7 @@ def _run_until_decision(incident: Incident):
             row.status = IncidentStatus.FAILED
             row.description = (row.description or "") + f"\n[BLOCKED] {risk.rationale}"
             _audit(db, incident.correlation_id, row.id, "system", "blocked", {"rationale": risk.rationale})
+            _event(db, row.id, "INCIDENT_BLOCKED", {"rationale": risk.rationale})
             db.commit()
             return
 
@@ -134,6 +160,7 @@ def _run_until_decision(incident: Incident):
         db.add(approval)
         row.status = IncidentStatus.AWAITING_APPROVAL
         _audit(db, incident.correlation_id, row.id, "system", "awaiting_approval", {"plan_id": plan_row.id})
+        _event(db, row.id, "APPROVAL_REQUESTED", {"plan_id": plan_row.id, "risk_level": risk.risk_level.value})
         db.commit()
     finally:
         db.close()
@@ -160,6 +187,7 @@ def approve_incident(incident_id: str, decided_by: str, reason: str | None = Non
         approval.reason = reason
         plan_id = approval.plan_id
         _audit(db, row.correlation_id, incident_id, f"human:{decided_by}", "approved", {"reason": reason})
+        _event(db, incident_id, "HUMAN_APPROVED", {"decided_by": decided_by, "reason": reason})
         db.commit()
     finally:
         db.close()
@@ -194,6 +222,7 @@ def reject_incident(incident_id: str, decided_by: str, reason: str | None = None
         approval.reason = reason
         row.status = IncidentStatus.REJECTED
         _audit(db, row.correlation_id, incident_id, f"human:{decided_by}", "rejected", {"reason": reason})
+        _event(db, incident_id, "HUMAN_REJECTED", {"decided_by": decided_by, "reason": reason})
         db.commit()
         return {"incident_id": incident_id, "status": row.status.value}
     finally:
@@ -215,6 +244,7 @@ def _execute_and_validate(incident_id: str, plan_id: str):
             return
 
         row.status = IncidentStatus.EXECUTING
+        _event(db, incident_id, "REPAIR_STARTED", {"plan_id": plan_id})
         db.commit()
 
         execution = existing_exec or RepairExecution(
@@ -254,10 +284,14 @@ def _execute_and_validate(incident_id: str, plan_id: str):
             row.status = IncidentStatus.FAILED
             PIPELINE_REPAIRS_FAILED_TOTAL.inc()
             _audit(db, row.correlation_id, incident_id, "agent", "execution_failed", {"error": exec_error})
+            _event(db, incident_id, "REPAIR_FAILED", {"error": exec_error})
             db.commit()
             return
 
+        _event(db, incident_id, "REPAIR_COMPLETED", {"tool_calls": tool_calls_log})
+
         row.status = IncidentStatus.VALIDATING
+        _event(db, incident_id, "VALIDATION_STARTED", {})
         db.commit()
 
         # validate: independently re-measure state, never trust tool return codes
@@ -276,7 +310,10 @@ def _execute_and_validate(incident_id: str, plan_id: str):
             row.resolved_at = dt.utcnow()
             PIPELINE_REPAIRS_SUCCESS_TOTAL.inc()
             _audit(db, row.correlation_id, incident_id, "agent", "resolved", validation)
+            _event(db, incident_id, "VALIDATION_PASSED", validation)
+            _event(db, incident_id, "INCIDENT_RESOLVED", {})
         else:
+            _event(db, incident_id, "VALIDATION_FAILED", validation)
             # rollback
             for action in reversed(plan_row.plan_json.get("actions", [])):
                 if action.get("rollback_tool_name"):
@@ -291,6 +328,7 @@ def _execute_and_validate(incident_id: str, plan_id: str):
             row.status = IncidentStatus.ROLLED_BACK
             PIPELINE_REPAIRS_FAILED_TOTAL.inc()
             _audit(db, row.correlation_id, incident_id, "agent", "rolled_back", validation)
+            _event(db, incident_id, "INCIDENT_ROLLED_BACK", validation)
 
         db.commit()
     finally:
