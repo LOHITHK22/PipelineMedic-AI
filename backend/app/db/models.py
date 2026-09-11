@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
-    Column, String, DateTime, Float, Integer, Boolean, ForeignKey, Text, Enum, JSON
+    Column, String, DateTime, Float, Integer, Boolean, ForeignKey, Text, Enum, JSON, Identity
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
@@ -79,6 +79,14 @@ class IncidentEvent(Base):
     __tablename__ = "incident_events"
 
     id = Column(UUID(as_uuid=False), primary_key=True, default=gen_uuid)
+    # Monotonic insertion sequence, independent of `created_at`. Several
+    # lifecycle events (e.g. CANARY_VALIDATION_PASSED + CANARY_EXPANDED) are
+    # written and committed back-to-back within the same request, and
+    # `datetime.utcnow()` has millisecond resolution -- not always enough to
+    # avoid ties. `seq` is DB-assigned (a real sequence), so ordering the
+    # timeline by it is always correct and matches actual write order, unlike
+    # sorting by `created_at` alone.
+    seq = Column(Integer, Identity(always=False), nullable=False)
     incident_id = Column(UUID(as_uuid=False), ForeignKey("incidents.id"), nullable=False)
     event_type = Column(String(64), nullable=False)
     payload = Column(JSON, nullable=False, default=dict)
@@ -190,3 +198,44 @@ class SchemaVersion(Base):
     version = Column(Integer, nullable=False)
     schema_json = Column(JSON, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class SystemEvent(Base):
+    """A timestamped record of a system-level event that can plausibly have
+    triggered downstream incidents -- schema version bumps, synthetic
+    deployment markers from fault-injection scripts, config changes.
+
+    This is deliberately a separate, append-only table from `incident_events`
+    (which records an INCIDENT's own lifecycle): a SystemEvent may exist with
+    no incident ever created from it, and correlation (see
+    app.agents.correlation) reads this table to explain an incident's
+    plausible trigger without ever mutating it.
+    """
+
+    __tablename__ = "system_events"
+
+    id = Column(UUID(as_uuid=False), primary_key=True, default=gen_uuid)
+    event_type = Column(String(64), nullable=False, index=True)  # SCHEMA_VERSION_CHANGE, DEPLOYMENT, CONFIG_CHANGE
+    component = Column(String(128), nullable=False, index=True)  # e.g. "orders.raw", "flink-validator"
+    payload = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class LLMInvocation(Base):
+    """Audit row for every LLM provider call attempted by the agent graph
+    (diagnose / generate_repair_plan), real or deduplicated-skipped. This is
+    the basis for the cost-protection metrics in app.observability.metrics
+    and the GET /metrics/llm-usage endpoint -- see app.agents.cost_tracking.
+    """
+
+    __tablename__ = "llm_invocations"
+
+    id = Column(UUID(as_uuid=False), primary_key=True, default=gen_uuid)
+    incident_id = Column(UUID(as_uuid=False), ForeignKey("incidents.id"), nullable=False, index=True)
+    correlation_id = Column(String(64), nullable=False, index=True)
+    provider = Column(String(32), nullable=False)
+    call_type = Column(String(32), nullable=False)  # diagnose | generate_repair_plan
+    estimated_tokens = Column(Integer, nullable=False, default=0)
+    skipped_dedup = Column(Boolean, nullable=False, default=False)
+    reused_from_incident_id = Column(UUID(as_uuid=False), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)

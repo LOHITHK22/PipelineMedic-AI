@@ -129,3 +129,35 @@ and a `MEMORY_RETRIEVED` `IncidentEvent` (visible in the incident timeline)
 listing the matches and their similarity scores, so the influence is always
 auditable after the fact. `GET /incidents/{id}/similar` exposes the same
 retrieval on demand for any incident (resolved or not) for inspection.
+
+## Event correlation: pointing at a plausible trigger, not just symptoms
+
+`backend/app/agents/correlation.py::find_correlated_events`, wired into
+`collect_context()` (`backend/app/agents/context_collector.py`) as
+`context["correlated_events"]`, deterministically looks for `SystemEvent`
+rows (schema version bumps, synthetic deployment markers, config changes --
+see `backend/app/db/models.py::SystemEvent`) and other `Incident` rows within
+a configurable window (default 600s) before the current incident that share
+a related component and/or match a small, explicit type-relationship table
+(e.g. a `SCHEMA_VERSION_CHANGE` is a plausible trigger for `SCHEMA_DRIFT`).
+As with incident memory, this is structured-field + timestamp matching only
+-- never fuzzy text similarity or an LLM judgment call -- so every match
+carries an explicit, inspectable `reason` string. `MockLLMProvider.diagnose`
+surfaces the single closest correlated event in its `reasoning` field (this
+is the "schema version bumped ... 47 seconds before failures began" style
+explainability from the original spec) and nudges confidence up slightly
+when the trigger occurred within 120 seconds -- but the root cause itself is
+still always computed first from the incident's own evidence;
+correlation only ever annotates it. `GET /incidents/{id}/correlation`
+exposes the full ranked correlation list independently of the LLM's
+interpretation. See `docs/safety-model.md` for how schema-version bumps and
+fault-injection scripts actually populate `system_events`.
+
+## Canary remediation and LLM cost protection
+
+See `docs/safety-model.md` ("Canary remediation" and "Cost protection") for
+the two remaining advanced features: a canary validation gate for MEDIUM/HIGH
+risk repairs (`backend/app/agents/graph.py::_execute_and_validate`), and
+LLM-invocation audit tracking + exact-signature deduplication
+(`backend/app/agents/cost_tracking.py`) to stop retries/duplicate incidents
+from burning repeated LLM calls.

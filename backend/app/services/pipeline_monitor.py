@@ -30,7 +30,7 @@ from app.detectors.flink_failure import FlinkFailureDetector
 from app.agents.graph import receive_incident
 from app.models.schemas import CompatibilityClass, IncidentType, Severity
 from app.db.base import SessionLocal
-from app.db.models import SchemaVersion
+from app.db.models import SchemaVersion, SystemEvent
 
 logger = logging.getLogger("pipelinemedic.monitor")
 
@@ -164,6 +164,29 @@ class PipelineMonitor:
         if diff.overall_compatibility == CompatibilityClass.BREAKING:
             from app.detectors.base import build_incident
             import uuid
+
+            # Record the schema bump itself as both a new SchemaVersion row
+            # and a SystemEvent, *before* raising the incident, so
+            # app.agents.correlation can find it within the incident's
+            # correlation window (see Feature: event correlation).
+            db2 = SessionLocal()
+            try:
+                prev_version = baseline.version if baseline else 1
+                new_version = prev_version + 1
+                db2.add(SchemaVersion(subject="orders.raw", version=new_version, schema_json=inferred))
+                db2.add(SystemEvent(
+                    event_type="SCHEMA_VERSION_CHANGE",
+                    component="orders.raw",
+                    payload={
+                        "subject": "orders.raw",
+                        "old_version": prev_version,
+                        "new_version": new_version,
+                        "changed_fields": sorted({c.field_name for c in diff.changes}),
+                    },
+                ))
+                db2.commit()
+            finally:
+                db2.close()
 
             incident = build_incident(
                 incident_type=IncidentType.SCHEMA_DRIFT,

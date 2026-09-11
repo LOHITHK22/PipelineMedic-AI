@@ -10,3 +10,19 @@ APPROVAL_WAIT_SECONDS = Histogram("approval_wait_seconds", "Time an incident spe
 AGENT_DIAGNOSIS_DURATION = Histogram("agent_diagnosis_duration_seconds", "Time spent producing an LLM diagnosis")
 KAFKA_CONSUMER_LAG = Gauge("kafka_consumer_lag", "Last observed consumer lag", ["topic", "group_id"])
 PIPELINE_ERROR_RATE = Gauge("pipeline_error_rate", "Fraction of recent messages routed to DLQ", ["topic"])
+
+# Cost-protection metrics (see app.agents.cost_tracking, GET /metrics/llm-usage)
+LLM_INVOCATIONS_TOTAL = Counter(
+    "llm_invocations_total", "Total LLM provider calls attempted (real, not deduped)", ["call_type"]
+)
+LLM_INVOCATIONS_SKIPPED_TOTAL = Counter(
+    "llm_invocations_skipped_total", "Total LLM provider calls skipped via duplicate-incident dedup", ["call_type"]
+)
+LLM_ESTIMATED_TOKENS_TOTAL = Counter(
+    "llm_estimated_tokens_total", "Total estimated tokens across real (non-deduped) LLM calls", ["call_type"]
+)
+
+# Canary remediation metrics (see docs/safety-model.md "Canary remediation")
+CANARY_STARTED_TOTAL = Counter("canary_started_total", "Total canary-scoped repairs started")
+CANARY_VALIDATION_PASSED_TOTAL = Counter("canary_validation_passed_total", "Total canary validations that passed")
+CANARY_VALIDATION_FAILED_TOTAL = Counter("canary_validation_failed_total", "Total canary validations that failed (triggered rollback)")

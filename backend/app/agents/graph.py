@@ -20,17 +20,20 @@ import time
 import uuid
 
 from app.agents.context_collector import collect_context
+from app.agents.cost_tracking import estimate_tokens, find_recent_duplicate, record_llm_invocation
 from app.agents.memory import find_similar_resolved_incidents, remember_resolved_incident
 from app.agents.state import AgentNode, AgentState
 from app.db.base import SessionLocal
 from app.db.models import (
     ApprovalDecision, ApprovalRequest, AuditLog, Incident as IncidentRow, IncidentEvent,
-    IncidentStatus, RepairExecution, RiskLevel as DBRiskLevel, ValidationResult,
+    IncidentStatus, RepairExecution, RepairPlan as RepairPlanRow, RiskLevel as DBRiskLevel, ValidationResult,
 )
 from app.llm.provider import get_llm_provider
-from app.models.schemas import AutonomyDecision, Incident, RiskLevel
+from app.models.schemas import AutonomyDecision, DiagnosisResult, Incident, RepairPlan, RiskLevel
 from app.observability.metrics import (
-    AGENT_DIAGNOSIS_DURATION, PIPELINE_INCIDENTS_TOTAL, PIPELINE_REPAIRS_FAILED_TOTAL,
+    AGENT_DIAGNOSIS_DURATION, CANARY_STARTED_TOTAL, CANARY_VALIDATION_FAILED_TOTAL,
+    CANARY_VALIDATION_PASSED_TOTAL, LLM_ESTIMATED_TOKENS_TOTAL, LLM_INVOCATIONS_SKIPPED_TOTAL,
+    LLM_INVOCATIONS_TOTAL, PIPELINE_INCIDENTS_TOTAL, PIPELINE_REPAIRS_FAILED_TOTAL,
     PIPELINE_REPAIRS_SUCCESS_TOTAL, PIPELINE_REPAIRS_TOTAL,
 )
 from app.policies.engine import assess_risk
@@ -123,36 +126,80 @@ def _run_until_decision(incident: Incident):
             })
             db.commit()
 
-        # diagnose
+        # Cost protection: if an incident with the exact same evidence
+        # signature (detector type + component + evidence fingerprint) was
+        # already diagnosed very recently, reuse that diagnosis/plan instead
+        # of invoking the LLM again. Guards against duplicate incidents or
+        # retries burning LLM calls without ever skipping diagnosis for a
+        # genuinely new incident (see app.agents.cost_tracking).
         provider = get_llm_provider()
-        start = time.time()
-        diagnosis = provider.diagnose(incident, context, similar_incidents=similar_incidents)
-        AGENT_DIAGNOSIS_DURATION.observe(time.time() - start)
-        row.diagnosis = diagnosis.model_dump()
-        _audit(db, incident.correlation_id, row.id, "agent", "diagnosis_complete", diagnosis.model_dump())
-        _event(db, row.id, "DIAGNOSIS_CREATED", diagnosis.model_dump())
-        if diagnosis.informed_by_memory:
-            _audit(db, incident.correlation_id, row.id, "system", "diagnosis_informed_by_memory", {
-                "similar_past_incidents": diagnosis.similar_past_incidents,
-            })
-        db.commit()
+        provider_name = type(provider).__name__
+        duplicate_row = find_recent_duplicate(db, incident)
 
-        # generate_repair_plan
-        plan = provider.generate_repair_plan(incident, diagnosis, context, similar_incidents=similar_incidents)
-        plan.incident_id = row.id
-        _audit(db, incident.correlation_id, row.id, "agent", "repair_plan_generated", plan.model_dump())
-        _event(db, row.id, "REPAIR_PLAN_CREATED", plan.model_dump())
-        if plan.informed_by_memory:
-            _audit(db, incident.correlation_id, row.id, "system", "repair_plan_informed_by_memory", {
-                "similar_past_incidents": plan.similar_past_incidents,
+        if duplicate_row is not None:
+            diagnosis = DiagnosisResult(**duplicate_row.diagnosis)
+            dup_plan_row = (
+                db.query(RepairPlanRow)
+                .filter_by(incident_id=duplicate_row.id)
+                .order_by(RepairPlanRow.created_at.desc())
+                .first()
+            )
+            plan = RepairPlan(**dup_plan_row.plan_json)
+            record_llm_invocation(
+                db, row.id, incident.correlation_id, provider_name, "diagnose",
+                estimated_tokens=0, skipped_dedup=True, reused_from_incident_id=duplicate_row.id,
+            )
+            record_llm_invocation(
+                db, row.id, incident.correlation_id, provider_name, "generate_repair_plan",
+                estimated_tokens=0, skipped_dedup=True, reused_from_incident_id=duplicate_row.id,
+            )
+            LLM_INVOCATIONS_SKIPPED_TOTAL.labels(call_type="diagnose").inc()
+            LLM_INVOCATIONS_SKIPPED_TOTAL.labels(call_type="generate_repair_plan").inc()
+            _audit(db, incident.correlation_id, row.id, "system", "llm_call_deduplicated", {
+                "reused_from_incident_id": duplicate_row.id,
             })
-        db.commit()
+            _event(db, row.id, "DIAGNOSIS_CREATED", diagnosis.model_dump())
+            _event(db, row.id, "REPAIR_PLAN_CREATED", plan.model_dump())
+            row.diagnosis = diagnosis.model_dump()
+            db.commit()
+        else:
+            # diagnose
+            start = time.time()
+            diagnosis = provider.diagnose(incident, context, similar_incidents=similar_incidents)
+            AGENT_DIAGNOSIS_DURATION.observe(time.time() - start)
+            diag_tokens = estimate_tokens(incident.model_dump_json() + str(context))
+            record_llm_invocation(db, row.id, incident.correlation_id, provider_name, "diagnose", diag_tokens)
+            LLM_INVOCATIONS_TOTAL.labels(call_type="diagnose").inc()
+            LLM_ESTIMATED_TOKENS_TOTAL.labels(call_type="diagnose").inc(diag_tokens)
+            row.diagnosis = diagnosis.model_dump()
+            _audit(db, incident.correlation_id, row.id, "agent", "diagnosis_complete", diagnosis.model_dump())
+            _event(db, row.id, "DIAGNOSIS_CREATED", diagnosis.model_dump())
+            if diagnosis.informed_by_memory:
+                _audit(db, incident.correlation_id, row.id, "system", "diagnosis_informed_by_memory", {
+                    "similar_past_incidents": diagnosis.similar_past_incidents,
+                })
+            db.commit()
+
+            # generate_repair_plan
+            plan = provider.generate_repair_plan(incident, diagnosis, context, similar_incidents=similar_incidents)
+            plan_tokens = estimate_tokens(diagnosis.model_dump_json() + str(context))
+            record_llm_invocation(db, row.id, incident.correlation_id, provider_name, "generate_repair_plan", plan_tokens)
+            LLM_INVOCATIONS_TOTAL.labels(call_type="generate_repair_plan").inc()
+            LLM_ESTIMATED_TOKENS_TOTAL.labels(call_type="generate_repair_plan").inc(plan_tokens)
+            plan.incident_id = row.id
+            _audit(db, incident.correlation_id, row.id, "agent", "repair_plan_generated", plan.model_dump())
+            _event(db, row.id, "REPAIR_PLAN_CREATED", plan.model_dump())
+            if plan.informed_by_memory:
+                _audit(db, incident.correlation_id, row.id, "system", "repair_plan_informed_by_memory", {
+                    "similar_past_incidents": plan.similar_past_incidents,
+                })
+            db.commit()
+
+        plan.incident_id = row.id
 
         # calculate_risk
         risk = assess_risk(plan, incident.severity)
         _audit(db, incident.correlation_id, row.id, "agent", "risk_calculated", risk.model_dump())
-
-        from app.db.models import RepairPlan as RepairPlanRow
 
         plan_row = RepairPlanRow(
             incident_id=row.id, plan_json=plan.model_dump(), risk_level=DBRiskLevel(risk.risk_level.value),
@@ -309,6 +356,68 @@ def _execute_and_validate(incident_id: str, plan_id: str):
             _event(db, incident_id, "REPAIR_FAILED", {"error": exec_error})
             db.commit()
             return
+
+        # Canary remediation: for MEDIUM/HIGH risk repairs, validate at a
+        # restricted/canary scope BEFORE declaring the repair complete and
+        # running the full validation pass, rather than committing to 100%
+        # rollout immediately. LOW risk repairs (already auto-executed only
+        # because they were assessed as low-risk) skip this and go straight
+        # to the existing full validate -> resolve/rollback path.
+        #
+        # Honest scope of "canary" here (see docs/safety-model.md): our tools
+        # operate on a single Kafka topic / single Flink job, not a
+        # traffic-splittable fleet, so there is no infrastructure to route a
+        # literal 5% of live traffic through the new code path. What we
+        # *can* do honestly is apply the repair, then immediately run one
+        # independent re-measurement of pipeline health (the same
+        # validate_pipeline_health tool used for full validation) as a fast
+        # canary check before declaring the repair complete -- if that
+        # canary check fails, we roll back immediately without ever running
+        # (or claiming to have run) the full validation pass. This is a
+        # real gate, not a cosmetic one: a canary failure here changes the
+        # outcome (ROLLED_BACK vs RESOLVED) and skips REPAIR_COMPLETED /
+        # VALIDATION_STARTED entirely.
+        if plan_row.risk_level in (DBRiskLevel.MEDIUM, DBRiskLevel.HIGH):
+            _event(db, incident_id, "CANARY_STARTED", {
+                "risk_level": plan_row.risk_level.value,
+                "scope_note": "single-instance validation gate; see docs/safety-model.md for scope/limitations",
+            })
+            CANARY_STARTED_TOTAL.inc()
+            db.commit()
+
+            canary_validation = invoke_tool("validate_pipeline_health", {}, row.correlation_id, incident_id)
+            canary_passed = bool(canary_validation.get("healthy"))
+            db.add(ValidationResult(
+                incident_id=incident_id, execution_id=execution.id,
+                passed=canary_passed, checks={**canary_validation.get("checks", {}), "canary": True},
+            ))
+
+            if not canary_passed:
+                CANARY_VALIDATION_FAILED_TOTAL.inc()
+                _event(db, incident_id, "CANARY_VALIDATION_FAILED", canary_validation)
+                _audit(db, row.correlation_id, incident_id, "agent", "canary_validation_failed", canary_validation)
+
+                for action in reversed(plan_row.plan_json.get("actions", [])):
+                    if action.get("rollback_tool_name"):
+                        try:
+                            invoke_tool(
+                                action["rollback_tool_name"], action.get("rollback_input") or {},
+                                row.correlation_id, incident_id,
+                            )
+                        except Exception as e:
+                            logger.error("Canary rollback of %s failed: %s", action["rollback_tool_name"], e)
+                execution.status = "ROLLED_BACK"
+                row.status = IncidentStatus.ROLLED_BACK
+                PIPELINE_REPAIRS_FAILED_TOTAL.inc()
+                _audit(db, row.correlation_id, incident_id, "agent", "rolled_back", canary_validation)
+                _event(db, incident_id, "INCIDENT_ROLLED_BACK", canary_validation)
+                db.commit()
+                return
+
+            CANARY_VALIDATION_PASSED_TOTAL.inc()
+            _event(db, incident_id, "CANARY_VALIDATION_PASSED", canary_validation)
+            _event(db, incident_id, "CANARY_EXPANDED", {"expanded_scope": "full"})
+            db.commit()
 
         _event(db, incident_id, "REPAIR_COMPLETED", {"tool_calls": tool_calls_log})
 

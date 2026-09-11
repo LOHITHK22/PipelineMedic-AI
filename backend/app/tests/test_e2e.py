@@ -73,10 +73,16 @@ def test_schema_drift_full_lifecycle(clean_db, monkeypatch):
         events = (
             db.query(IncidentEvent)
             .filter_by(incident_id=incident_id)
-            .order_by(IncidentEvent.created_at.asc())
+            .order_by(IncidentEvent.seq.asc())
             .all()
         )
         event_types = [e.event_type for e in events]
+        # This schema-drift repair plan includes apply_safe_config_patch,
+        # a MEDIUM-risk tool -- so it goes through the canary remediation
+        # path (CANARY_STARTED -> CANARY_VALIDATION_PASSED -> CANARY_EXPANDED)
+        # before the existing full REPAIR_COMPLETED/VALIDATION/RESOLVED
+        # sequence. See app.agents.graph._execute_and_validate and
+        # docs/safety-model.md ("Canary remediation").
         assert event_types == [
             "INCIDENT_DETECTED",
             "CONTEXT_COLLECTED",
@@ -85,6 +91,9 @@ def test_schema_drift_full_lifecycle(clean_db, monkeypatch):
             "APPROVAL_REQUESTED",
             "HUMAN_APPROVED",
             "REPAIR_STARTED",
+            "CANARY_STARTED",
+            "CANARY_VALIDATION_PASSED",
+            "CANARY_EXPANDED",
             "REPAIR_COMPLETED",
             "VALIDATION_STARTED",
             "VALIDATION_PASSED",

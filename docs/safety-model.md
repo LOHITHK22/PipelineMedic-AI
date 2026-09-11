@@ -32,6 +32,78 @@
    decision, and every state transition is written to `audit_log` with
    `correlation_id`/`incident_id`.
 
+## Canary remediation (MEDIUM/HIGH risk repairs)
+
+Auto-executed (LOW risk) repairs go straight through execute -> validate ->
+resolve/rollback, as above. A MEDIUM/HIGH risk repair -- which by definition
+already required and received human approval -- goes through one additional
+gate before being declared resolved: `_execute_and_validate` in
+`backend/app/agents/graph.py` applies the repair, then immediately runs one
+independent `validate_pipeline_health` check as a fast canary gate
+(`CANARY_STARTED` -> `CANARY_VALIDATION_PASSED`/`CANARY_VALIDATION_FAILED`
+incident events) *before* the existing full `REPAIR_COMPLETED` /
+`VALIDATION_STARTED` / full-validation sequence runs. A failed canary check
+rolls back immediately (`INCIDENT_ROLLED_BACK`) and never reaches
+`REPAIR_COMPLETED` or a full validation pass -- the outcome genuinely
+changes, this is not a cosmetic extra event.
+
+**Honest scope and limitations of "canary" here.** A textbook canary
+deployment routes a small percentage of live traffic through a new code path
+on a separate instance/pool and compares metrics before expanding. This
+project's tools operate on a single Kafka topic and a single Flink job --
+there is no traffic-splittable fleet to route a literal 5% of orders through,
+and no infrastructure in this demo to build one honestly. What this
+implementation actually does is apply the repair once, then insert an extra,
+independent re-measurement of pipeline health as a hard gate before
+declaring success, so a repair that looks superficially "applied" but didn't
+actually fix anything gets caught and rolled back before the incident is ever
+marked RESOLVED. It is a real correctness gate (see
+`backend/app/tests/test_advanced_features.py::test_failed_canary_validation_rolls_back_without_full_validation`),
+just not a literal traffic-percentage canary -- do not describe it as one in
+customer-facing material without this caveat.
+
+## Cost protection: LLM invocation tracking and deduplication
+
+Every `diagnose()`/`generate_repair_plan()` attempt (real or deduplicated) is
+recorded in the `llm_invocations` table (`backend/app/agents/cost_tracking.py`),
+with a deterministic size-based token estimate (tiktoken's `cl100k_base` if
+installed, else `len(text)//4` -- documented as an estimate, never a real
+LLM's billed token count, since the mock provider makes no network call at
+all). See `GET /metrics/llm-usage` and the `llm_invocations_total` /
+`llm_invocations_skipped_total` / `llm_estimated_tokens_total` Prometheus
+counters.
+
+Before invoking the LLM, `find_recent_duplicate` looks for another incident
+with the *exact same* detector-type + component + evidence-signature
+fingerprint (the same deterministic signature incident-memory retrieval
+already computes -- see `app.agents.memory.evidence_signature`) created
+within the last 60 seconds that already has a diagnosis and plan. If found,
+that diagnosis/plan is reused (and both `LLMInvocation` rows are marked
+`skipped_dedup=True`, referencing the incident they were reused from) instead
+of calling the LLM again. This intentionally requires an **exact** signature
+match, not a similarity threshold -- it exists to stop retries/duplicate
+detections of the same underlying event from burning repeated LLM calls, not
+to silently skip diagnosis for a genuinely new incident that merely looks
+similar (that case is what incident-memory's fuzzy Jaccard retrieval is for,
+and it always still runs a fresh diagnosis).
+
+## Event correlation
+
+`backend/app/agents/correlation.py` deterministically matches a `SystemEvent`
+(schema version bump, synthetic deployment marker, config change -- see the
+`system_events` table) or a prior `Incident` against a new incident when they
+share a related component and/or a hard-coded type-relationship rule (e.g.
+`SCHEMA_VERSION_CHANGE` is a plausible trigger for `SCHEMA_DRIFT`,
+`POISON_MESSAGE`, `AIRFLOW_FAILURE`, `DATA_QUALITY`) within a configurable
+time window before the incident (default 600s). This is matching on
+structured fields and timestamps only -- no fuzzy text similarity, no LLM
+judgment call -- so a correlation can always be explained by pointing at the
+exact fields and time delta that matched. The mock LLM provider surfaces the
+closest correlated event in its diagnosis reasoning (and nudges confidence up
+slightly when the trigger occurred within 120 seconds), and
+`GET /incidents/{id}/correlation` exposes the full ranked list independently
+of any LLM interpretation of it.
+
 ## What this does NOT protect against
 
 - A compromised or buggy detector emitting false incidents at high volume

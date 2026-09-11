@@ -2,12 +2,30 @@
 detector already captured, so diagnosis has richer grounding."""
 from __future__ import annotations
 
+from app.agents.correlation import find_correlated_events
+from app.db.base import SessionLocal
 from app.models.schemas import Incident, IncidentType
 from app.tools.registry import invoke_tool
 
 
 def collect_context(incident: Incident) -> dict:
     context: dict = {"detector_evidence": incident.evidence}
+
+    # Event correlation: deterministic lookup of system events / prior
+    # incidents within the correlation window that plausibly triggered this
+    # one (see app.agents.correlation). Feeds diagnose() as structured
+    # evidence -- never a substitute for the evidence-grounded diagnosis
+    # itself.
+    db = SessionLocal()
+    try:
+        correlated = find_correlated_events(db, incident)
+        context["correlated_events"] = [c.to_dict() for c in correlated]
+    except Exception as e:
+        context["correlated_events"] = []
+        context["correlation_error"] = str(e)
+    finally:
+        db.close()
+
     try:
         if incident.incident_type == IncidentType.KAFKA_LAG:
             context["recent_errors"] = invoke_tool(

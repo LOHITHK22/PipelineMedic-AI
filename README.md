@@ -59,9 +59,35 @@ just written:
   independently validated, and marked `RESOLVED` -- end to end, against
   real Kafka and Postgres, not mocked.
 - `/metrics` (Prometheus) reflects real counters incremented by that run.
-- 31/31 pytest tests pass, including a true DB-backed end-to-end test
-  (`backend/app/tests/test_e2e.py`) exercising the full lifecycle described
-  above via the same service functions the API uses.
+- 50/50 pytest tests pass, including true DB-backed end-to-end tests
+  (`backend/app/tests/test_e2e.py`, `backend/app/tests/test_advanced_features.py`)
+  exercising the full lifecycle described above, plus event correlation,
+  canary remediation, and LLM cost protection (see below), via the same
+  service functions the API uses.
+
+**Event correlation, canary remediation, and LLM cost protection** were
+added on top of the above and verified against the same live stack, not just
+unit-tested:
+- Running `scripts/inject_schema_drift.py --record-deployment-event` against
+  the live stack produced a real incident whose `GET
+  /incidents/{id}/correlation` correctly surfaced the synthetic `DEPLOYMENT`
+  `system_events` row recorded moments earlier as the plausible trigger, and
+  whose diagnosis `reasoning` text referenced it directly.
+- Approving that (MEDIUM-risk) incident produced the real event sequence
+  `CANARY_STARTED -> CANARY_VALIDATION_PASSED -> CANARY_EXPANDED ->
+  REPAIR_COMPLETED -> ... -> INCIDENT_RESOLVED` at `GET /incidents/{id}`,
+  confirming the canary gate actually runs before full validation (see
+  `docs/safety-model.md` for what "canary" honestly means here -- a
+  re-measurement gate, not literal traffic splitting).
+- `GET /metrics/llm-usage` reflected real, non-deduplicated `diagnose`/
+  `generate_repair_plan` invocations and estimated token counts for that run.
+  Duplicate-incident deduplication (skipping a repeat LLM call for an
+  identical evidence signature within the dedup window) is covered by a real
+  DB-backed test (`test_duplicate_incident_signature_skips_second_llm_call`)
+  rather than the live stack, because the pre-existing poison-message
+  detector's `dedup_key` is not time-varying and collides with itself on a
+  second live injection after the first incident resolves -- a pre-existing
+  bug unrelated to this feature, flagged separately, not fixed here.
 
 **Flink and Airflow are real and verified too** (see `docs/limitations.md`
 for the exact bugs found and fixed, and `docs/demo.md` for the commands):
@@ -122,10 +148,13 @@ use the standard `postgres:5432`.
   `HEALTHY`/`DEGRADED`/`UNKNOWN` per component (`UNKNOWN` means that
   component isn't running in this profile, not that it's broken)
 - `GET /incidents`, `GET /incidents/{id}` (includes plans, approvals, executions, validations, and `incident_events` timeline)
+- `GET /incidents/{id}/similar` (fuzzy incident-memory retrieval)
+- `GET /incidents/{id}/correlation` — deterministic event correlation: `SystemEvent`s (schema version bumps, synthetic deployment markers, config changes) and prior incidents within a time window that plausibly triggered this one (see `docs/agent-design.md`)
 - `POST /incidents/{id}/approve`, `POST /incidents/{id}/reject`
 - `GET /approvals`
 - `GET /audit` (chronological SYSTEM/AGENT/HUMAN audit trail)
 - `GET /tools` (MCP-style tool catalog with risk levels and JSON schemas)
+- `GET /metrics/llm-usage` — LLM invocation/token-estimate audit trail plus how many calls were skipped via duplicate-incident deduplication (see `docs/safety-model.md` "Cost protection")
 
 CORS is enabled permissively (`allow_origins=["*"]`) in `backend/app/main.py`
 for local development only, so the dashboard (a separately served React app)

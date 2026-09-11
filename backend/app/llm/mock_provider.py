@@ -24,6 +24,22 @@ class MockLLMProvider(LLMProvider):
         best_match = _best_match(similar_incidents)
         result = self._diagnose_raw(incident, ev)
 
+        # Event correlation only ever ANNOTATES the diagnosis for
+        # explainability; the root cause itself is always computed above from
+        # the incident's own evidence. A high-confidence correlated trigger
+        # (close in time, structurally related) gets called out explicitly --
+        # this is the "schema version bumped ... 47 seconds before failures
+        # began" style explainability from the original spec.
+        best_correlated = _best_correlated_event(context)
+        if best_correlated is not None:
+            result.reasoning += (
+                f" Correlated trigger: {best_correlated['event_type']} on "
+                f"'{best_correlated['component']}' occurred {best_correlated['seconds_before']:.0f}s "
+                f"before detection ({best_correlated['reason']})."
+            )
+            if best_correlated["seconds_before"] <= 120:
+                result.confidence = min(0.99, result.confidence + 0.02)
+
         # Memory only ever ANNOTATES the diagnosis for transparency; it never
         # replaces the fresh, evidence-grounded root cause/confidence computed
         # above. If a highly similar validated past incident exists, we note
@@ -265,6 +281,16 @@ def _best_match(similar_incidents: list[SimilarIncidentMatch] | None) -> Similar
     if not similar_incidents:
         return None
     return max(similar_incidents, key=lambda m: m.similarity)
+
+
+def _best_correlated_event(context: dict | None) -> dict | None:
+    """Pick the single closest-in-time correlated event from
+    context['correlated_events'] (already sorted soonest-before-first by
+    app.agents.correlation.find_correlated_events)."""
+    if not context:
+        return None
+    events = context.get("correlated_events") or []
+    return events[0] if events else None
 
 
 def _rename_mapping(changes: list[dict]) -> dict[str, str]:

@@ -9,7 +9,7 @@ from app.api.health import router as health_router
 from app.api.incidents import router as incidents_router
 from app.api.tools import router as tools_router
 from app.config import settings
-from app.db.base import Base, engine
+from app.db.base import Base, apply_lightweight_schema_patches, engine
 from app.observability.logging_config import configure_logging
 from app.services.pipeline_monitor import monitor
 
@@ -19,6 +19,7 @@ configure_logging()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
+    apply_lightweight_schema_patches()
     if settings.app_env != "test":
         monitor.start()
     yield

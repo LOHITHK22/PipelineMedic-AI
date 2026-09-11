@@ -79,7 +79,7 @@ def get_incident(incident_id: str, db: Session = Depends(get_db)):
     events = (
         db.query(IncidentEvent)
         .filter_by(incident_id=incident_id)
-        .order_by(IncidentEvent.created_at.asc())
+        .order_by(IncidentEvent.seq.asc())
         .all()
     )
     data["events"] = [
@@ -112,6 +112,68 @@ def get_similar_incidents(incident_id: str, top_n: int = 3, db: Session = Depend
     )
     matches = find_similar_resolved_incidents(db, incident_schema, top_n=top_n)
     return {"incident_id": incident_id, "similar_incidents": [m.model_dump() for m in matches]}
+
+
+@router.get("/incidents/{incident_id}/correlation")
+def get_incident_correlation(incident_id: str, window_seconds: int = 600, db: Session = Depends(get_db)):
+    """Deterministic event correlation for the given incident: SystemEvents
+    (schema bumps, synthetic deployments, config changes) and other incidents
+    within `window_seconds` before this one's creation that plausibly
+    triggered it. See app.agents.correlation for the matching rules."""
+    row = db.query(IncidentRow).get(incident_id)
+    if not row:
+        raise HTTPException(404, "incident not found")
+    from app.agents.correlation import find_correlated_events
+
+    incident_schema = IncidentSchema(
+        id=row.id,
+        dedup_key=row.dedup_key,
+        incident_type=IncidentType(row.incident_type),
+        severity=Severity(row.severity),
+        source_component=row.source_component,
+        title=row.title,
+        description=row.description or "",
+        evidence=row.evidence or {},
+        correlation_id=row.correlation_id,
+        detected_at=row.created_at,
+    )
+    correlated = find_correlated_events(db, incident_schema, detected_at=row.created_at, window_seconds=window_seconds)
+    return {
+        "incident_id": incident_id,
+        "window_seconds": window_seconds,
+        "correlated_events": [c.to_dict() for c in correlated],
+    }
+
+
+@router.get("/metrics/llm-usage")
+def get_llm_usage(db: Session = Depends(get_db)):
+    """Cost-protection visibility: total LLM invocations, estimated tokens,
+    and how many calls were skipped via incident-signature deduplication.
+    Backed by the llm_invocations audit table -- see app.agents.cost_tracking."""
+    from sqlalchemy import func
+
+    from app.db.models import LLMInvocation
+
+    total = db.query(func.count(LLMInvocation.id)).scalar() or 0
+    skipped = db.query(func.count(LLMInvocation.id)).filter(LLMInvocation.skipped_dedup.is_(True)).scalar() or 0
+    real = total - skipped
+    total_tokens = db.query(func.coalesce(func.sum(LLMInvocation.estimated_tokens), 0)).filter(
+        LLMInvocation.skipped_dedup.is_(False)
+    ).scalar() or 0
+    by_call_type = dict(
+        db.query(LLMInvocation.call_type, func.count(LLMInvocation.id)).group_by(LLMInvocation.call_type).all()
+    )
+    return {
+        "total_invocations_logged": total,
+        "real_invocations": real,
+        "skipped_via_dedup": skipped,
+        "total_estimated_tokens": int(total_tokens),
+        "by_call_type": by_call_type,
+        "note": (
+            "estimated_tokens is a deterministic size-based estimate (tiktoken if installed, else "
+            "chars/4), not a real LLM token count -- no real LLM is invoked in mock mode."
+        ),
+    }
 
 
 class ApprovalDecisionBody(BaseModel):
