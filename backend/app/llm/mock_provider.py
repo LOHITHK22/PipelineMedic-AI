@@ -8,16 +8,38 @@ end-to-end with LLM_PROVIDER=mock and no API key.
 """
 from __future__ import annotations
 
+from app.agents.memory import HIGH_SIMILARITY_THRESHOLD
 from app.models.schemas import (
-    DiagnosisResult, Incident, IncidentType, RepairAction, RepairPlan, RiskLevel,
+    DiagnosisResult, Incident, IncidentType, RepairAction, RepairPlan, RiskLevel, SimilarIncidentMatch,
 )
 from app.llm.provider import LLMProvider
 
 
 class MockLLMProvider(LLMProvider):
-    def diagnose(self, incident: Incident, context: dict) -> DiagnosisResult:
+    def diagnose(
+        self, incident: Incident, context: dict,
+        similar_incidents: list[SimilarIncidentMatch] | None = None,
+    ) -> DiagnosisResult:
         ev = incident.evidence
+        best_match = _best_match(similar_incidents)
+        result = self._diagnose_raw(incident, ev)
 
+        # Memory only ever ANNOTATES the diagnosis for transparency; it never
+        # replaces the fresh, evidence-grounded root cause/confidence computed
+        # above. If a highly similar validated past incident exists, we note
+        # it and nudge confidence up slightly (still capped at 0.99) because
+        # an independently-reasoned diagnosis matching a confirmed precedent
+        # is corroborating evidence, not a reason to skip reasoning.
+        if best_match is not None:
+            result.informed_by_memory = True
+            result.similar_past_incidents = [
+                f"{m.incident_id} (similarity={m.similarity}): {m.root_cause}" for m in (similar_incidents or [])
+            ]
+            if best_match.similarity >= HIGH_SIMILARITY_THRESHOLD:
+                result.confidence = min(0.99, result.confidence + 0.03)
+        return result
+
+    def _diagnose_raw(self, incident: Incident, ev: dict) -> DiagnosisResult:
         if incident.incident_type == IncidentType.SCHEMA_DRIFT:
             changes = ev.get("changes", [])
             breaking = [c for c in changes if c.get("compatibility") == "BREAKING"]
@@ -108,9 +130,28 @@ class MockLLMProvider(LLMProvider):
             recommended_action_summary="Escalate to human on-call for manual triage.",
         )
 
-    def generate_repair_plan(self, incident: Incident, diagnosis: DiagnosisResult, context: dict) -> RepairPlan:
+    def generate_repair_plan(
+        self, incident: Incident, diagnosis: DiagnosisResult, context: dict,
+        similar_incidents: list[SimilarIncidentMatch] | None = None,
+    ) -> RepairPlan:
         ev = incident.evidence
+        best_match = _best_match(similar_incidents)
+        plan = self._generate_repair_plan_raw(incident, ev)
 
+        # As with diagnose(): memory only annotates the plan for visibility.
+        # The plan's actions themselves are always generated fresh from the
+        # CURRENT incident's evidence/diagnosis above -- a past repair is
+        # never copied in verbatim, and risk/validation are always run fresh
+        # downstream in the graph (calculate_risk -> execute -> validate)
+        # regardless of what memory says.
+        if best_match is not None:
+            plan.informed_by_memory = True
+            plan.similar_past_incidents = [
+                f"{m.incident_id} (similarity={m.similarity}): {m.repair_summary}" for m in (similar_incidents or [])
+            ]
+        return plan
+
+    def _generate_repair_plan_raw(self, incident: Incident, ev: dict) -> RepairPlan:
         if incident.incident_type == IncidentType.SCHEMA_DRIFT:
             actions = [
                 RepairAction(
@@ -218,6 +259,12 @@ class MockLLMProvider(LLMProvider):
             expected_outcome="Human operator triages manually.",
             estimated_risk_level=RiskLevel.HIGH,
         )
+
+
+def _best_match(similar_incidents: list[SimilarIncidentMatch] | None) -> SimilarIncidentMatch | None:
+    if not similar_incidents:
+        return None
+    return max(similar_incidents, key=lambda m: m.similarity)
 
 
 def _rename_mapping(changes: list[dict]) -> dict[str, str]:

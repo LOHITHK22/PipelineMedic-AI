@@ -9,3 +9,8 @@ venv/
 .idea/
 .vscode/
 node_modules/
+
+# Eval harness writes a fresh timestamped/latest report on every run; only a
+# committed sample (eval-results/sample-report.json) is tracked for demo.
+eval-results/*
+!eval-results/sample-report.json

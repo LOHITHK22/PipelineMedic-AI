@@ -20,6 +20,7 @@ import time
 import uuid
 
 from app.agents.context_collector import collect_context
+from app.agents.memory import find_similar_resolved_incidents, remember_resolved_incident
 from app.agents.state import AgentNode, AgentState
 from app.db.base import SessionLocal
 from app.db.models import (
@@ -109,21 +110,42 @@ def _run_until_decision(incident: Incident):
         _event(db, row.id, "CONTEXT_COLLECTED", {"context_keys": list(context.keys())})
         db.commit()
 
+        # memory retrieval: deterministic structured similarity search over
+        # past, validated-successful incidents of the same type (see
+        # app.agents.memory). Passed into diagnose/generate_repair_plan as
+        # context only -- it never substitutes for fresh reasoning, risk
+        # scoring, or validation (see docs/agent-design.md).
+        similar_incidents = find_similar_resolved_incidents(db, incident, top_n=3)
+        if similar_incidents:
+            _event(db, row.id, "MEMORY_RETRIEVED", {
+                "count": len(similar_incidents),
+                "matches": [m.model_dump() for m in similar_incidents],
+            })
+            db.commit()
+
         # diagnose
         provider = get_llm_provider()
         start = time.time()
-        diagnosis = provider.diagnose(incident, context)
+        diagnosis = provider.diagnose(incident, context, similar_incidents=similar_incidents)
         AGENT_DIAGNOSIS_DURATION.observe(time.time() - start)
         row.diagnosis = diagnosis.model_dump()
         _audit(db, incident.correlation_id, row.id, "agent", "diagnosis_complete", diagnosis.model_dump())
         _event(db, row.id, "DIAGNOSIS_CREATED", diagnosis.model_dump())
+        if diagnosis.informed_by_memory:
+            _audit(db, incident.correlation_id, row.id, "system", "diagnosis_informed_by_memory", {
+                "similar_past_incidents": diagnosis.similar_past_incidents,
+            })
         db.commit()
 
         # generate_repair_plan
-        plan = provider.generate_repair_plan(incident, diagnosis, context)
+        plan = provider.generate_repair_plan(incident, diagnosis, context, similar_incidents=similar_incidents)
         plan.incident_id = row.id
         _audit(db, incident.correlation_id, row.id, "agent", "repair_plan_generated", plan.model_dump())
         _event(db, row.id, "REPAIR_PLAN_CREATED", plan.model_dump())
+        if plan.informed_by_memory:
+            _audit(db, incident.correlation_id, row.id, "system", "repair_plan_informed_by_memory", {
+                "similar_past_incidents": plan.similar_past_incidents,
+            })
         db.commit()
 
         # calculate_risk
@@ -312,6 +334,10 @@ def _execute_and_validate(incident_id: str, plan_id: str):
             _audit(db, row.correlation_id, incident_id, "agent", "resolved", validation)
             _event(db, incident_id, "VALIDATION_PASSED", validation)
             _event(db, incident_id, "INCIDENT_RESOLVED", {})
+            # Remember this confirmed-successful fix for future similarity
+            # retrieval. Only ever written on a real validation pass -- a
+            # rolled-back or failed repair is never remembered as a precedent.
+            remember_resolved_incident(db, row, row.diagnosis, plan_row.plan_json)
         else:
             _event(db, incident_id, "VALIDATION_FAILED", validation)
             # rollback

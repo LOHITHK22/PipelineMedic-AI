@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.agents import graph
+from app.agents.memory import find_similar_resolved_incidents
 from app.db.base import get_db
 from app.db.models import (
     ApprovalRequest,
@@ -15,6 +16,7 @@ from app.db.models import (
     RepairPlan as RepairPlanRow,
     ValidationResult,
 )
+from app.models.schemas import Incident as IncidentSchema, IncidentType, Severity
 
 router = APIRouter()
 
@@ -86,6 +88,30 @@ def get_incident(incident_id: str, db: Session = Depends(get_db)):
         for e in events
     ]
     return data
+
+
+@router.get("/incidents/{incident_id}/similar")
+def get_similar_incidents(incident_id: str, top_n: int = 3, db: Session = Depends(get_db)):
+    """Deterministic incident-memory retrieval for the given incident: past
+    RESOLVED-with-passing-validation incidents ranked by structured
+    similarity (incident type + component + evidence-signature Jaccard
+    overlap). See app.agents.memory for the algorithm."""
+    row = db.query(IncidentRow).get(incident_id)
+    if not row:
+        raise HTTPException(404, "incident not found")
+    incident_schema = IncidentSchema(
+        id=row.id,
+        dedup_key=row.dedup_key,
+        incident_type=IncidentType(row.incident_type),
+        severity=Severity(row.severity),
+        source_component=row.source_component,
+        title=row.title,
+        description=row.description or "",
+        evidence=row.evidence or {},
+        correlation_id=row.correlation_id,
+    )
+    matches = find_similar_resolved_incidents(db, incident_schema, top_n=top_n)
+    return {"incident_id": incident_id, "similar_incidents": [m.model_dump() for m in matches]}
 
 
 class ApprovalDecisionBody(BaseModel):

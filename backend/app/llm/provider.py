@@ -9,17 +9,31 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from app.models.schemas import DiagnosisResult, Incident, RepairPlan
+from app.models.schemas import DiagnosisResult, Incident, RepairPlan, SimilarIncidentMatch
 from app.config import settings
 
 
 class LLMProvider(ABC):
+    """`similar_incidents`, when given, is a list of `SimilarIncidentMatch` as
+    returned by `app.agents.memory.find_similar_resolved_incidents` -- past,
+    validated-successful incidents of the same type ranked by deterministic
+    structured similarity. Providers may use this to inform diagnosis/planning
+    but must never substitute it for evidence-grounded reasoning; risk
+    assessment and validation always run fresh regardless of what memory
+    suggests."""
+
     @abstractmethod
-    def diagnose(self, incident: Incident, context: dict) -> DiagnosisResult:
+    def diagnose(
+        self, incident: Incident, context: dict,
+        similar_incidents: list[SimilarIncidentMatch] | None = None,
+    ) -> DiagnosisResult:
         ...
 
     @abstractmethod
-    def generate_repair_plan(self, incident: Incident, diagnosis: DiagnosisResult, context: dict) -> RepairPlan:
+    def generate_repair_plan(
+        self, incident: Incident, diagnosis: DiagnosisResult, context: dict,
+        similar_incidents: list[SimilarIncidentMatch] | None = None,
+    ) -> RepairPlan:
         ...
 
 
@@ -46,20 +60,37 @@ class OpenAIProvider(LLMProvider):
         )
         return completion.choices[0].message.parsed
 
-    def diagnose(self, incident: Incident, context: dict) -> DiagnosisResult:
+    def diagnose(
+        self, incident: Incident, context: dict,
+        similar_incidents: list[SimilarIncidentMatch] | None = None,
+    ) -> DiagnosisResult:
         system = (
             "You are a pipeline reliability diagnostician. You NEVER invent facts not present "
-            "in the evidence. You output structured diagnoses only."
+            "in the evidence. You output structured diagnoses only. You may be given similar past "
+            "resolved incidents as context -- use them to inform your reasoning, but you must "
+            "independently justify the diagnosis from the CURRENT evidence; never copy a past "
+            "root cause without re-checking it fits the current evidence."
         )
-        user = f"Incident: {incident.model_dump_json()}\nContext: {context}"
+        similar_json = [m.model_dump() for m in (similar_incidents or [])]
+        user = f"Incident: {incident.model_dump_json()}\nContext: {context}\nSimilar past incidents: {similar_json}"
         return self._structured_call(system, user, DiagnosisResult)
 
-    def generate_repair_plan(self, incident: Incident, diagnosis: DiagnosisResult, context: dict) -> RepairPlan:
+    def generate_repair_plan(
+        self, incident: Incident, diagnosis: DiagnosisResult, context: dict,
+        similar_incidents: list[SimilarIncidentMatch] | None = None,
+    ) -> RepairPlan:
         system = (
             "You are a pipeline repair planner. You may only reference tools from the provided "
-            "MCP tool catalog. Never propose shell commands or raw SQL. Output a structured plan."
+            "MCP tool catalog. Never propose shell commands or raw SQL. Output a structured plan. "
+            "Similar past incidents (if given) may bias which repair you propose, but risk and "
+            "validation are always assessed fresh for this incident -- never assume a past fix "
+            "applies without justification."
         )
-        user = f"Incident: {incident.model_dump_json()}\nDiagnosis: {diagnosis.model_dump_json()}\nContext: {context}"
+        similar_json = [m.model_dump() for m in (similar_incidents or [])]
+        user = (
+            f"Incident: {incident.model_dump_json()}\nDiagnosis: {diagnosis.model_dump_json()}\n"
+            f"Context: {context}\nSimilar past incidents: {similar_json}"
+        )
         return self._structured_call(system, user, RepairPlan)
 
 

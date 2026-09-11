@@ -157,6 +157,31 @@ class AuditLog(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class IncidentMemory(Base):
+    """One remembered, resolved incident + the repair that actually fixed it.
+
+    Populated only when an incident reaches INCIDENT_RESOLVED with
+    validation.passed == True (see app.agents.graph._execute_and_validate,
+    app.agents.memory.remember_resolved_incident). Retrieval is a
+    deterministic structured-field similarity search (see
+    app.agents.memory.find_similar_resolved_incidents) -- no embeddings or
+    vector DB, consistent with this project's "deterministic engineering for
+    observable facts" philosophy documented in docs/agent-design.md.
+    """
+
+    __tablename__ = "incident_memory"
+
+    id = Column(UUID(as_uuid=False), primary_key=True, default=gen_uuid)
+    incident_id = Column(UUID(as_uuid=False), ForeignKey("incidents.id"), nullable=False, index=True)
+    incident_type = Column(String(64), nullable=False, index=True)
+    source_component = Column(String(64), nullable=False)
+    evidence_signature = Column(JSON, nullable=False, default=list)  # sorted list[str] of signature tokens
+    root_cause = Column(Text, nullable=False)
+    repair_plan_json = Column(JSON, nullable=False)
+    validated_success = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class SchemaVersion(Base):
     __tablename__ = "schema_versions"
 

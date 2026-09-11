@@ -70,3 +70,62 @@ one incident. Detection is separately deduplicated via a content-derived
 `dedup_key` (`backend/app/detectors/base.py::make_dedup_key`) so re-observing
 the same underlying condition (e.g. the lag monitor polling every few
 seconds) doesn't create N duplicate incidents.
+
+## Incident memory: retrieval design
+
+`backend/app/agents/memory.py` gives the agent a durable memory of past,
+*confirmed-successful* repairs, retrieved during `diagnose` and
+`generate_repair_plan` (`backend/app/agents/graph.py::_run_until_decision`).
+
+**Storage**: `incident_memory` (`backend/app/db/models.py::IncidentMemory`)
+is a small, purpose-built table -- not a reuse of `incidents` +
+`repair_plans` directly -- so a memory row is written exactly once, exactly
+when it should be: from `_execute_and_validate`, only on the branch where
+`validation.passed == True` and the incident reaches `RESOLVED`. A repair
+that was rolled back, or an incident that failed, is never written there and
+can therefore never be surfaced as a "similar successful precedent" --
+memory only ever remembers things that were independently confirmed to
+work, never things that were merely attempted.
+
+**Retrieval is deliberately NOT vector/embedding-based.** No embeddings, no
+external vector DB. Instead, `evidence_signature()` deterministically reduces
+`incident.evidence` to a small set of short string tokens, specific to each
+detector's evidence shape (e.g. `field:customer_id`, `change:RENAMED`,
+`compat:BREAKING` for schema drift; `reason:INVALID_JSON` for poison
+messages; `topic:...`, `group:...`, a lag-magnitude bucket for Kafka lag).
+Similarity between the current incident and a remembered one is plain
+Jaccard similarity (`|A ∩ B| / |A ∪ B|`) over these token sets, with a small
+bonus when `source_component` matches exactly. This was chosen over
+embeddings because:
+
+  - The evidence is already structured (JSON), not prose -- there is no
+    unstructured text that actually needs semantic embedding.
+  - Every similarity score is fully explainable by pointing at the exact
+    overlapping tokens, which matters when that score is allowed to
+    influence an autonomous repair decision.
+  - It adds zero new infrastructure (no vector DB, no embedding API/model)
+    to a project that otherwise deliberately keeps every other decision
+    (detection, risk) fully deterministic and inspectable.
+
+**Memory only ever informs, never replaces, fresh reasoning.** The retrieved
+matches (`SimilarIncidentMatch`, capped at `top_n=3`, most-similar first) are
+passed into `LLMProvider.diagnose()` / `.generate_repair_plan()` as an
+explicit, visible parameter -- never hidden state. `MockLLMProvider` still
+computes the diagnosis/plan from the CURRENT incident's evidence first
+(`_diagnose_raw` / `_generate_repair_plan_raw`); memory only *annotates* the
+result afterward: it sets `informed_by_memory=True` and populates
+`similar_past_incidents` (both visible fields on `DiagnosisResult` and
+`RepairPlan`), and -- only when the best match clears
+`HIGH_SIMILARITY_THRESHOLD` (0.6 Jaccard) -- nudges diagnosis confidence up
+slightly (capped at 0.99) as corroborating evidence. It never substitutes a
+past repair plan's actions for freshly-generated ones, and it never skips
+`calculate_risk` or `validate` for the current incident -- every incident
+still gets its own independent risk assessment and post-repair validation
+regardless of how similar a past incident was.
+
+When memory does inform a decision, `graph.py` writes both an
+`AuditLog` row (`diagnosis_informed_by_memory` / `repair_plan_informed_by_memory`)
+and a `MEMORY_RETRIEVED` `IncidentEvent` (visible in the incident timeline)
+listing the matches and their similarity scores, so the influence is always
+auditable after the fact. `GET /incidents/{id}/similar` exposes the same
+retrieval on demand for any incident (resolved or not) for inspection.

@@ -15,6 +15,9 @@ logs:
 test:
 	cd backend && python -m pytest app/tests -v
 
+eval:
+	cd backend && python -m app.eval.runner
+
 inject-schema-drift:
 	python scripts/inject_schema_drift.py
 

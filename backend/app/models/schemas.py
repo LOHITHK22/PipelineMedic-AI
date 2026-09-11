@@ -90,6 +90,23 @@ class DiagnosisResult(BaseModel):
     affected_components: list[str]
     reasoning: str
     recommended_action_summary: str
+    informed_by_memory: bool = False
+    similar_past_incidents: list[str] = Field(default_factory=list)
+
+
+class SimilarIncidentMatch(BaseModel):
+    """One result from incident-memory retrieval, surfaced via the API and
+    passed to the LLM provider as context (never used to blindly repeat a
+    fix -- see docs/agent-design.md)."""
+
+    memory_id: str
+    incident_id: str | None = None
+    similarity: float = Field(ge=0.0, le=1.0)
+    incident_type: str
+    source_component: str
+    root_cause: str
+    repair_summary: str
+    validated_success: bool
 
 
 class RepairAction(BaseModel):
@@ -111,6 +128,8 @@ class RepairPlan(BaseModel):
     actions: list[RepairAction]
     expected_outcome: str
     estimated_risk_level: RiskLevel  # LLM's own opinion; policy engine has final say
+    informed_by_memory: bool = False
+    similar_past_incidents: list[str] = Field(default_factory=list)
 
 
 class RiskAssessment(BaseModel):
