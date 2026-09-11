@@ -104,6 +104,91 @@ slightly when the trigger occurred within 120 seconds), and
 `GET /incidents/{id}/correlation` exposes the full ranked list independently
 of any LLM interpretation of it.
 
+## Notifications
+
+`backend/app/services/notifications.py` defines a `NotificationService`
+abstraction with two implementations, selected by `NOTIFICATION_CHANNEL`
+(default `console`):
+
+- **ConsoleNotifier** (default) logs a structured message through the
+  existing JSON logger on `INCIDENT_DETECTED` and on entering
+  `AWAITING_APPROVAL`. This is what's actually exercised in this repo --
+  every notification also writes a `NOTIFICATION_SENT` `incident_events` row
+  and an `audit_log` entry, so notification delivery is auditable the same
+  way every other lifecycle step is.
+- **SMTPNotifier** is a fully implemented real `smtplib`/`email.mime`
+  sender, reading `SMTP_HOST`/`PORT`/`USERNAME`/`PASSWORD`/`FROM_ADDR`/
+  `TO_ADDR` from env (see `.env.example`). It requires the user's own SMTP
+  credentials to actually deliver mail and has **not** been exercised
+  against a real mailbox in this session -- if required settings are
+  missing it logs an error and no-ops rather than raising, so a
+  misconfigured SMTP notifier can't crash the agent graph.
+
+A notifier failure of any kind is caught and logged, never re-raised into
+the agent graph (see `app.agents.graph._notify`) -- a broken notification
+channel must never block incident detection or repair execution.
+
+## Approve-link security model
+
+`GET /approve-link/{token}` / `POST /approve-link/{token}/decide` let
+someone act on an `AWAITING_APPROVAL` incident directly from a notification
+link, without having the main dashboard "open."
+
+**There is no separate authentication system in this repo.** The token
+itself is the credential -- exactly the same trust model as a
+password-reset email link. Concretely (`backend/app/services/approval_tokens.py`):
+
+- Tokens are signed with `itsdangerous.URLSafeTimedSerializer` (chosen over
+  a hand-rolled HMAC scheme because it bundles signature + embedded
+  timestamp + URL-safe encoding in one well-known, audited library).
+  Tampering with the payload (incident id, plan id) invalidates the
+  signature.
+- Every token also has a durable `approval_tokens` DB row keyed by an opaque
+  `token_id`, marked `consumed` at decision time -- so single-use survives
+  process restarts and doesn't rely on in-memory state.
+- Expiry is enforced both by the signed timestamp (`itsdangerous`
+  `max_age`) and is configurable via `APPROVAL_TOKEN_MAX_AGE_SECONDS`
+  (default 1800s / 30 minutes).
+- `GET /approve-link/{token}` is read-only and safe to call repeatedly --
+  it validates but never consumes the token.
+- `POST /approve-link/{token}/decide` consumes the token (marks it
+  `consumed`) as part of the same transaction that checks its validity,
+  then calls the **exact same** `agents.graph.approve_incident` /
+  `reject_incident` functions the main dashboard's `POST
+  /incidents/{id}/approve`/`reject` endpoints call -- there is exactly one
+  approve/reject implementation, not two independent ones. The audit log
+  and `HUMAN_APPROVED`/`HUMAN_REJECTED` incident_events record which
+  mechanism was used (`decided_via: "dashboard"` vs `"approve-link"`) for
+  traceability.
+- `APPROVAL_TOKEN_SECRET` MUST be overridden with a real secret outside
+  local development -- the shipped default is intentionally an obvious
+  placeholder (`dev-insecure-secret-change-me`).
+
+Failure modes are always reported cleanly rather than as a generic 500: an
+expired, already-used, malformed, or no-longer-`AWAITING_APPROVAL` token
+returns `{valid: false, error: "expired"|"invalid"|"already_used"|"already_decided"}`
+from the GET, and a structured 400 from the decide endpoint.
+
+## Ask about this incident (deterministic Q&A, not a new agentic surface)
+
+`POST /incidents/{id}/ask` and the dashboard's "Ask about this incident" box
+answer plain-English questions about an incident. This is explicitly **not**
+a new LLM chat integration and **not** a new agentic action surface:
+
+- It never calls an LLM provider and never invokes a tool.
+- `backend/app/services/incident_qa.py` only reads this incident's
+  already-persisted `diagnosis` / `RepairPlan.plan_json` / risk fields
+  (computed once, during the normal `diagnose()`/`generate_repair_plan()`
+  agent-graph steps) and deterministically templates them into prose,
+  optionally leading with a different section based on keywords in the
+  question (`why`/`cause` -> root cause first; `fix`/`repair`/`solution` ->
+  repair plan first; `risk`/`approve` -> risk assessment first; otherwise a
+  balanced summary).
+- Because it only rephrases existing structured fields and never generates
+  new content, it is structurally incapable of hallucinating beyond what
+  was already diagnosed, and cannot trigger or influence any real
+  infrastructure action.
+
 ## What this does NOT protect against
 
 - A compromised or buggy detector emitting false incidents at high volume

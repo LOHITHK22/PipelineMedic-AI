@@ -83,12 +83,17 @@ def test_schema_drift_full_lifecycle(clean_db, monkeypatch):
         # before the existing full REPAIR_COMPLETED/VALIDATION/RESOLVED
         # sequence. See app.agents.graph._execute_and_validate and
         # docs/safety-model.md ("Canary remediation").
+        # NOTIFICATION_SENT events are emitted on INCIDENT_DETECTED (visibility)
+        # and on APPROVAL_REQUESTED (approve-link notification) -- see
+        # app.services.notifications and app.agents.graph._notify.
         assert event_types == [
             "INCIDENT_DETECTED",
+            "NOTIFICATION_SENT",
             "CONTEXT_COLLECTED",
             "DIAGNOSIS_CREATED",
             "REPAIR_PLAN_CREATED",
             "APPROVAL_REQUESTED",
+            "NOTIFICATION_SENT",
             "HUMAN_APPROVED",
             "REPAIR_STARTED",
             "CANARY_STARTED",

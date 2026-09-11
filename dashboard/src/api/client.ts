@@ -1,5 +1,7 @@
 import type {
   ApprovalListItem,
+  ApproveLinkResponse,
+  AskAnswer,
   AuditLogEntry,
   Incident,
   IncidentDetail,
@@ -49,6 +51,20 @@ export const api = {
     request<ApprovalListItem[]>(`/approvals?pending_only=${pendingOnly}`),
 
   listAudit: (limit = 200) => request<AuditLogEntry[]>(`/audit?limit=${limit}`),
+
+  getApproveLink: (token: string) => request<ApproveLinkResponse>(`/approve-link/${encodeURIComponent(token)}`),
+
+  decideApproveLink: (token: string, decision: "approve" | "reject", reason?: string) =>
+    request(`/approve-link/${encodeURIComponent(token)}/decide`, {
+      method: "POST",
+      body: JSON.stringify({ decision, reason: reason ?? null }),
+    }),
+
+  askAboutIncident: (id: string, question: string) =>
+    request<AskAnswer>(`/incidents/${id}/ask`, {
+      method: "POST",
+      body: JSON.stringify({ question }),
+    }),
 
   health: () => request<{ status: string; llm_provider: string }>("/health"),
 

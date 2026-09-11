@@ -155,6 +155,9 @@ use the standard `postgres:5432`.
 - `GET /audit` (chronological SYSTEM/AGENT/HUMAN audit trail)
 - `GET /tools` (MCP-style tool catalog with risk levels and JSON schemas)
 - `GET /metrics/llm-usage` — LLM invocation/token-estimate audit trail plus how many calls were skipped via duplicate-incident deduplication (see `docs/safety-model.md` "Cost protection")
+- `GET /approve-link/{token}` — read-only lookup of a signed, single-use, time-limited approve-link token: returns the incident summary/diagnosis/plan without deciding anything, or `{valid: false, error: "expired"|"invalid"|"already_used"|"already_decided"}` (see `docs/safety-model.md` "Approve-link security model")
+- `POST /approve-link/{token}/decide` — `{decision: "approve"|"reject", reason?}`; validates + consumes the token, then calls the exact same service-layer approve/reject logic as `POST /incidents/{id}/approve`/`reject`
+- `POST /incidents/{id}/ask` — `{question}` -> `{answer}`; deterministic natural-language Q&A over an incident's already-computed diagnosis/repair-plan, **not** a new agentic surface (never calls an LLM or a tool — see `docs/safety-model.md` "Ask about this incident")
 
 CORS is enabled permissively (`allow_origins=["*"]`) in `backend/app/main.py`
 for local development only, so the dashboard (a separately served React app)
@@ -172,6 +175,8 @@ live API (every 6-8s) and renders:
 - **Incident Detail** — evidence, diagnosis + confidence, repair plan(s), risk level, approval status, execution result, validation result, and the incident_events timeline (populated for every incident type — see "Incident lifecycle events" below)
 - **Approvals** — Approve/Reject wired to the real endpoints (Reject requires a typed reason)
 - **Audit Log** — chronological SYSTEM/AGENT/HUMAN feed
+- **Incident Detail -> Ask about this incident** — a text box that answers plain-English questions using only that incident's already-computed diagnosis/plan (no new LLM call)
+- **/approve-link/:token** (standalone page, no dashboard chrome) — the page a notification link lands on: incident summary + real Approve/Reject buttons wired to the token-based decide endpoint, and a clear expired/used/invalid state
 
 Run it standalone against a running backend:
 

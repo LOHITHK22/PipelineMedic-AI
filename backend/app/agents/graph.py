@@ -37,6 +37,8 @@ from app.observability.metrics import (
     PIPELINE_REPAIRS_SUCCESS_TOTAL, PIPELINE_REPAIRS_TOTAL,
 )
 from app.policies.engine import assess_risk
+from app.services.approval_tokens import generate_approval_token
+from app.services.notifications import get_notification_service
 from app.tools.base import ToolPermissionError
 from app.tools.registry import invoke_tool
 
@@ -58,6 +60,25 @@ def _event(db, incident_id, event_type, payload=None):
     transitions (INCIDENT_DETECTED, CONTEXT_COLLECTED, DIAGNOSIS_CREATED, ...).
     """
     db.add(IncidentEvent(incident_id=incident_id, event_type=event_type, payload=payload or {}))
+
+
+def _notify(db, incident_id, correlation_id, notify_fn, payload_summary):
+    """Call `notify_fn()` (a zero-arg closure over the concrete notifier
+    call) and record a NOTIFICATION_SENT incident_event + audit_log entry,
+    consistent with how every other lifecycle step is tracked. Notification
+    failures are logged but never raised -- a broken notifier must not break
+    the agent graph."""
+    try:
+        notify_fn()
+        sent = True
+        error = None
+    except Exception as e:  # pragma: no cover - defensive; notifiers already catch their own errors
+        logger.error("Notification failed for incident %s: %s", incident_id, e)
+        sent = False
+        error = str(e)
+
+    _audit(db, correlation_id, incident_id, "system", "notification_sent", {**payload_summary, "sent": sent, "error": error})
+    _event(db, incident_id, "NOTIFICATION_SENT", {**payload_summary, "sent": sent, "error": error})
 
 
 def receive_incident(incident: Incident) -> str:
@@ -93,6 +114,19 @@ def receive_incident(incident: Incident) -> str:
             "source_component": incident.source_component,
             "title": incident.title,
         })
+        db.commit()
+
+        notifier = get_notification_service()
+        incident_payload = {
+            "id": row.id, "title": row.title, "incident_type": row.incident_type,
+            "severity": row.severity, "source_component": row.source_component,
+            "description": row.description,
+        }
+        _notify(
+            db, row.id, incident.correlation_id,
+            lambda: notifier.notify_incident_detected(incident_payload),
+            {"notification_type": "INCIDENT_DETECTED", "channel": type(notifier).__name__},
+        )
         db.commit()
     finally:
         db.close()
@@ -230,12 +264,35 @@ def _run_until_decision(incident: Incident):
         row.status = IncidentStatus.AWAITING_APPROVAL
         _audit(db, incident.correlation_id, row.id, "system", "awaiting_approval", {"plan_id": plan_row.id})
         _event(db, row.id, "APPROVAL_REQUESTED", {"plan_id": plan_row.id, "risk_level": risk.risk_level.value})
+
+        # Mint a signed, single-use, time-limited approve-link token (see
+        # app.services.approval_tokens) and notify with the real URL.
+        token = generate_approval_token(db, row.id, plan_row.id)
+        from app.config import settings as _settings
+        approve_link_url = f"{_settings.dashboard_base_url}/approve-link/{token}"
+
+        notifier = get_notification_service()
+        incident_payload = {
+            "id": row.id, "title": row.title, "incident_type": row.incident_type,
+            "severity": row.severity, "source_component": row.source_component,
+            "description": row.description,
+        }
+        _notify(
+            db, row.id, incident.correlation_id,
+            lambda: notifier.notify_approval_needed(incident_payload, approve_link_url),
+            {"notification_type": "APPROVAL_REQUESTED", "channel": type(notifier).__name__},
+        )
         db.commit()
     finally:
         db.close()
 
 
-def approve_incident(incident_id: str, decided_by: str, reason: str | None = None) -> dict:
+def approve_incident(incident_id: str, decided_by: str, reason: str | None = None, decided_via: str = "dashboard") -> dict:
+    """`decided_via` records which mechanism was used to decide (e.g.
+    "dashboard" or "approve-link") in the audit log for traceability. The
+    underlying execute/validate path is identical regardless of mechanism --
+    the approve-link decide endpoint calls this exact function rather than
+    duplicating the logic."""
     db = SessionLocal()
     try:
         row = db.query(IncidentRow).get(incident_id)
@@ -255,8 +312,8 @@ def approve_incident(incident_id: str, decided_by: str, reason: str | None = Non
         approval.decided_by = decided_by
         approval.reason = reason
         plan_id = approval.plan_id
-        _audit(db, row.correlation_id, incident_id, f"human:{decided_by}", "approved", {"reason": reason})
-        _event(db, incident_id, "HUMAN_APPROVED", {"decided_by": decided_by, "reason": reason})
+        _audit(db, row.correlation_id, incident_id, f"human:{decided_by}", "approved", {"reason": reason, "decided_via": decided_via})
+        _event(db, incident_id, "HUMAN_APPROVED", {"decided_by": decided_by, "reason": reason, "decided_via": decided_via})
         db.commit()
     finally:
         db.close()
@@ -270,7 +327,8 @@ def approve_incident(incident_id: str, decided_by: str, reason: str | None = Non
         db.close()
 
 
-def reject_incident(incident_id: str, decided_by: str, reason: str | None = None) -> dict:
+def reject_incident(incident_id: str, decided_by: str, reason: str | None = None, decided_via: str = "dashboard") -> dict:
+    """See `approve_incident` for the meaning of `decided_via`."""
     db = SessionLocal()
     try:
         row = db.query(IncidentRow).get(incident_id)
@@ -290,8 +348,8 @@ def reject_incident(incident_id: str, decided_by: str, reason: str | None = None
         approval.decided_by = decided_by
         approval.reason = reason
         row.status = IncidentStatus.REJECTED
-        _audit(db, row.correlation_id, incident_id, f"human:{decided_by}", "rejected", {"reason": reason})
-        _event(db, incident_id, "HUMAN_REJECTED", {"decided_by": decided_by, "reason": reason})
+        _audit(db, row.correlation_id, incident_id, f"human:{decided_by}", "rejected", {"reason": reason, "decided_via": decided_via})
+        _event(db, incident_id, "HUMAN_REJECTED", {"decided_by": decided_by, "reason": reason, "decided_via": decided_via})
         db.commit()
         return {"incident_id": incident_id, "status": row.status.value}
     finally:

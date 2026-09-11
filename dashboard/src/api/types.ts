@@ -151,6 +151,20 @@ export interface PipelineHealth {
   airflow: AirflowHealth;
 }
 
+export interface ApproveLinkResponse {
+  valid: boolean;
+  error?: string | null;
+  incident_status?: string;
+  incident?: IncidentDetail;
+  plan?: IncidentPlan | null;
+}
+
+export interface AskAnswer {
+  incident_id: string;
+  question: string;
+  answer: string;
+}
+
 export interface AuditLogEntry {
   id: string;
   correlation_id: string;

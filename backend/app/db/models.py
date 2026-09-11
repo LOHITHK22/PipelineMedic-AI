@@ -196,6 +196,27 @@ class IncidentMemory(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class ApprovalToken(Base):
+    """Single-use, time-limited token record backing the approve-link flow
+    (see backend/app/services/approval_tokens.py). The signed token itself
+    encodes incident_id/plan_id/expiry (itsdangerous), so this table is not
+    needed to *validate* the signature -- it exists purely to make
+    single-use durable across process restarts: a token is looked up by its
+    id here and marked consumed at decision time, and a signature that is
+    otherwise valid but missing/consumed here is rejected.
+    """
+
+    __tablename__ = "approval_tokens"
+
+    id = Column(UUID(as_uuid=False), primary_key=True, default=gen_uuid)
+    incident_id = Column(UUID(as_uuid=False), ForeignKey("incidents.id"), nullable=False, index=True)
+    plan_id = Column(UUID(as_uuid=False), ForeignKey("repair_plans.id"), nullable=False)
+    token_id = Column(String(64), unique=True, nullable=False, index=True)
+    consumed = Column(Boolean, nullable=False, default=False)
+    consumed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class SchemaVersion(Base):
     __tablename__ = "schema_versions"
 

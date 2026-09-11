@@ -47,5 +47,30 @@ class Settings(BaseSettings):
     lag_critical_threshold: int = 5000
     consumer_poll_interval_seconds: float = 2.0
 
+    # Notifications (see backend/app/services/notifications.py)
+    # console: logs a structured message via the JSON logger (default, no
+    # credentials required). smtp: sends real email via smtplib -- requires
+    # the user's own SMTP credentials, not demonstrated with a real mailbox
+    # in this repo. See docs/safety-model.md for the full write-up.
+    notification_channel: str = "console"  # console | smtp
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    smtp_from_addr: str | None = None
+    smtp_to_addr: str | None = None
+    smtp_use_tls: bool = True
+
+    # Approve-link tokens (see backend/app/services/approval_tokens.py)
+    # Secret key for signing single-use approve-link tokens (itsdangerous).
+    # MUST be overridden with a real secret outside local development.
+    approval_token_secret: str = "dev-insecure-secret-change-me"
+    approval_token_max_age_seconds: int = 1800  # 30 minutes
+    # Base URL of the dashboard the approve-link points at. Vite's default
+    # dev server port is 5173 (see dashboard/vite.config.ts); docker-compose
+    # publishes the dashboard container separately -- override in .env for
+    # non-local deployments.
+    dashboard_base_url: str = "http://localhost:5173"
+
 
 settings = Settings()

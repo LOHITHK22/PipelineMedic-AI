@@ -12,11 +12,14 @@ from app.db.models import (
     AuditLog,
     Incident as IncidentRow,
     IncidentEvent,
+    IncidentStatus,
     RepairExecution,
     RepairPlan as RepairPlanRow,
     ValidationResult,
 )
 from app.models.schemas import Incident as IncidentSchema, IncidentType, Severity
+from app.services.approval_tokens import consume_approval_token, validate_approval_token
+from app.services.incident_qa import answer_incident_question
 
 router = APIRouter()
 
@@ -208,6 +211,103 @@ def list_approvals(pending_only: bool = True, db: Session = Depends(get_db)):
          "requested_at": r.requested_at.isoformat()}
         for r in rows
     ]
+
+
+def _plan_summary_for(db: Session, plan_id: str) -> dict | None:
+    plan_row = db.query(RepairPlanRow).get(plan_id)
+    if not plan_row:
+        return None
+    return {
+        "id": plan_row.id, "plan_json": plan_row.plan_json, "risk_level": plan_row.risk_level.value,
+        "risk_rationale": plan_row.risk_rationale, "autonomy_decision": plan_row.autonomy_decision,
+    }
+
+
+@router.get("/approve-link/{token}")
+def get_approve_link(token: str, db: Session = Depends(get_db)):
+    """Validate the token (not expired, not consumed, matches a real
+    incident still AWAITING_APPROVAL) and, if valid, return the incident
+    summary WITHOUT approving/rejecting anything. Always returns 200 with an
+    `error` field on failure so the dashboard's ApproveLink page can render
+    a clear expired/used/invalid state without special-casing HTTP status
+    codes -- see docs/safety-model.md for the approve-link security model.
+    """
+    result = validate_approval_token(db, token)
+    if not result.valid:
+        return {"valid": False, "error": result.error}
+
+    row = db.query(IncidentRow).get(result.incident_id)
+    if not row:
+        return {"valid": False, "error": "invalid"}
+    if row.status != IncidentStatus.AWAITING_APPROVAL:
+        return {"valid": False, "error": "already_decided", "incident_status": row.status.value}
+
+    plan = _plan_summary_for(db, result.plan_id)
+    return {
+        "valid": True,
+        "incident": _serialize_incident(row),
+        "plan": plan,
+    }
+
+
+class ApproveLinkDecisionBody(BaseModel):
+    decision: str  # "approve" | "reject"
+    reason: str | None = None
+
+
+@router.post("/approve-link/{token}/decide")
+def decide_approve_link(token: str, body: ApproveLinkDecisionBody, db: Session = Depends(get_db)):
+    if body.decision not in ("approve", "reject"):
+        raise HTTPException(400, "decision must be 'approve' or 'reject'")
+
+    result = consume_approval_token(db, token)
+    if not result.valid:
+        db.commit()  # persist nothing changed, but keep session consistent
+        raise HTTPException(400, f"token {result.error}")
+
+    row = db.query(IncidentRow).get(result.incident_id)
+    if not row or row.status != IncidentStatus.AWAITING_APPROVAL:
+        db.commit()
+        raise HTTPException(400, "incident is no longer awaiting approval")
+
+    db.commit()  # persist token consumption before calling into the shared approve/reject logic
+
+    try:
+        if body.decision == "approve":
+            return graph.approve_incident(result.incident_id, "approve-link", body.reason, decided_via="approve-link")
+        return graph.reject_incident(result.incident_id, "approve-link", body.reason or "rejected via approve-link", decided_via="approve-link")
+    except (KeyError, ValueError) as e:
+        raise HTTPException(400, str(e))
+
+
+class AskQuestionBody(BaseModel):
+    question: str
+
+
+@router.post("/incidents/{incident_id}/ask")
+def ask_about_incident(incident_id: str, body: AskQuestionBody, db: Session = Depends(get_db)):
+    """Deterministic natural-language Q&A over THIS incident's already-
+    computed diagnosis/repair-plan/evidence. This is NOT a new agentic
+    action surface: it never calls an LLM and never invokes a tool -- it
+    only reads and rephrases existing diagnosis data (see
+    app.services.incident_qa)."""
+    if not body.question or not body.question.strip():
+        raise HTTPException(400, "question must not be empty")
+
+    row = db.query(IncidentRow).get(incident_id)
+    if not row:
+        raise HTTPException(404, "incident not found")
+
+    plan_row = (
+        db.query(RepairPlanRow)
+        .filter_by(incident_id=incident_id)
+        .order_by(RepairPlanRow.created_at.desc())
+        .first()
+    )
+    plan = _plan_summary_for(db, plan_row.id) if plan_row else None
+
+    answer = answer_incident_question(body.question, _serialize_incident(row), plan)
+    return {"incident_id": incident_id, "question": body.question, "answer": answer}
 
 
 @router.get("/audit")

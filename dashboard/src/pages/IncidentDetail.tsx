@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { api } from "../api/client";
 import { usePolling } from "../hooks/usePolling";
 import { Badge } from "../components/Badge";
+import { AskAboutIncident } from "../components/AskAboutIncident";
 
 export function IncidentDetail() {
   const { id } = useParams<{ id: string }>();
@@ -158,6 +159,8 @@ export function IncidentDetail() {
               ))}
             </div>
           )}
+
+          <AskAboutIncident incidentId={incident.id} />
 
           {incident.executions.length > 0 && (
             <div className="card">
