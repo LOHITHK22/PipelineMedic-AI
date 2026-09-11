@@ -12,39 +12,68 @@ on failure, and records everything to a full Postgres audit trail.
 
 ```mermaid
 flowchart LR
-    subgraph Pipeline
-        P[producer] --> K1[(orders.raw)]
-        K1 --> V[stream validator\n(Flink job / Python fallback)]
-        V --> K2[(orders.validated)]
-        V --> DLQ[(pipeline.dlq)]
-        K2 --> PG[(Postgres: orders)]
-        AF[Airflow DAG\norder_data_quality_dag] --> PG
+    subgraph pipeline["Pipeline"]
+        P["producer"] --> K1[("orders.raw")]
+        K1 --> V["stream validator<br/>(Flink job / Python fallback)"]
+        V --> K2[("orders.validated")]
+        V --> DLQ[("pipeline.dlq")]
+        K2 --> PG[("Postgres: orders")]
+        AF["Airflow DAG<br/>order_data_quality_dag"] --> PG
     end
 
-    subgraph PipelineMedic AI
-        MON[PipelineMonitor\ndetectors] --> AG[Agent graph]
-        AG --> LLM[LLM provider\n(mock/openai/azure)]
-        AG --> POL[Policy engine]
-        POL -->|LOW risk| EXE[Execute tools]
-        POL -->|MED/HIGH risk| APR[Persisted ApprovalRequest]
-        APR -->|human approves via API| EXE
-        EXE --> TOOLS[MCP-style tools]
-        TOOLS --> VAL[Validate]
-        VAL -->|healthy| RES[Resolved]
-        VAL -->|unhealthy| RB[Rollback]
+    subgraph medic["PipelineMedic AI"]
+        MON["PipelineMonitor<br/>detectors"] --> AG["Agent graph"]
+        AG --> LLM["LLM provider<br/>(mock/openai/azure)"]
+        AG --> POL["Policy engine"]
+        POL -->|"LOW risk"| EXE["Execute tools"]
+        POL -->|"MED/HIGH risk"| APR["Persisted ApprovalRequest"]
+        APR -->|"human approves via API"| EXE
+        EXE --> TOOLS["MCP-style tools"]
+        TOOLS --> VAL["Validate"]
+        VAL -->|"healthy"| RES["Resolved"]
+        VAL -->|"unhealthy"| RB["Rollback"]
     end
 
-    K1 -.observed by.-> MON
-    DLQ -.observed by.-> MON
-    AF -.observed by.-> MON
-    TOOLS -.audited to.-> AUDIT[(audit_log)]
+    K1 -.->|"observed by"| MON
+    DLQ -.->|"observed by"| MON
+    AF -.->|"observed by"| MON
+    TOOLS -.->|"audited to"| AUDIT[("audit_log")]
 ```
+
+## Features
+
+- **Deterministic detection** — schema drift, poison messages, Kafka consumer lag, Airflow task failures, Flink job failures (never guessed by an LLM)
+- **Structured-output diagnosis & repair planning** via a pluggable LLM provider (mock / OpenAI / Azure OpenAI)
+- **Deterministic risk scoring & autonomy policy** — LOW auto-executes, MEDIUM/HIGH require human approval, CRITICAL is hard-blocked in code
+- **Durable human-in-the-loop approval** — via the dashboard, the API, or a signed one-click approve-link
+- **Canary remediation, independent validation, and rollback** on failed repairs
+- **Full audit trail** — every lifecycle transition, tool call, and decision is recorded
+- **Incident memory & event correlation** — similar past incidents and preceding system events inform (never override) diagnosis
+- **Cost protection** — LLM invocation/token tracking with duplicate-incident deduplication
+- **Notifications & Q&A** — console/SMTP alerts on new incidents, plus a plain-English "ask about this incident" box grounded in the real diagnosis
+- **React + TypeScript dashboard** and a **22-tool MCP-style registry** enforcing typed, audited, permissioned execution
+
+## Table of contents
+
+- [What's real vs. what's documented-as-limitation](#whats-real-vs-whats-documented-as-limitation)
+- [Quick start](#quick-start)
+- [API surface](#api-surface)
+- [Dashboard](#dashboard)
+- [Repository layout](#repository-layout)
+- [Interview talking points](#interview-talking-points)
 
 ## What's real vs. what's documented-as-limitation
 
 This is a from-scratch build, verified running with `docker compose up
---build` in this environment. Everything below was actually executed, not
-just written:
+--build` in this environment — not a demo mocked up to look real. The short
+version: **everything listed in Features above was actually run against a
+live Kafka/Postgres/Flink/Airflow stack and observed working**, not just
+written. Click through for the exact commands and evidence.
+
+<details>
+<summary><strong>Full verification evidence (click to expand)</strong></summary>
+
+Everything below was actually executed, not just written:
 
 - Kafka (KRaft, `apache/kafka:3.7.0`), Postgres 16, FastAPI backend, and the
   order producer all build and run via `docker compose up --build -d
@@ -117,6 +146,8 @@ for the exact bugs found and fixed, and `docs/demo.md` for the commands):
 - **LLM providers other than mock**: `openai`/`azure_openai` are fully
   coded against structured outputs but require API keys not available here;
   only `LLM_PROVIDER=mock` is verified end-to-end (as the task required).
+
+</details>
 
 ## Quick start
 
