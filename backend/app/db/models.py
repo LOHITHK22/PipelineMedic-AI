@@ -54,7 +54,13 @@ class Incident(Base):
     __tablename__ = "incidents"
 
     id = Column(UUID(as_uuid=False), primary_key=True, default=gen_uuid)
-    dedup_key = Column(String(256), unique=True, nullable=False, index=True)
+    # Not globally unique: the same underlying issue can legitimately recur
+    # after a prior incident with this dedup_key has reached a terminal
+    # state (RESOLVED/ROLLED_BACK/REJECTED/FAILED). Uniqueness of "one open
+    # incident per dedup_key" is enforced in application logic
+    # (agents.graph.receive_incident), not at the DB level, so a fresh
+    # occurrence after resolution doesn't collide with the closed one.
+    dedup_key = Column(String(256), unique=False, nullable=False, index=True)
     incident_type = Column(String(64), nullable=False)  # SCHEMA_DRIFT, KAFKA_LAG, AIRFLOW_FAILURE, FLINK_FAILURE, DATA_QUALITY
     severity = Column(String(16), nullable=False, default="MEDIUM")
     status = Column(Enum(IncidentStatus), nullable=False, default=IncidentStatus.DETECTED)
