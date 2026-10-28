@@ -217,6 +217,46 @@ class ApprovalToken(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class McpActionApproval(Base):
+    """A persisted, single-use authorization for exactly one MCP tool call
+    (see backend/app/services/mcp_approvals.py).
+
+    Two sources write rows here:
+      - source="mcp_request": an MCP client called an approval-required tool
+        without an approval; the server recorded a PENDING request, which only
+        an operator can decide (operator CLI, never an MCP tool). Once
+        APPROVED it can be consumed exactly once, for the exact tool and
+        argument hash it was requested for.
+      - source="incident_plan": the agent (or any MCP caller) executed an
+        action that is part of an already human-approved / policy
+        auto-executed incident RepairPlan. The row is written already
+        CONSUMED, and the unique `grant_key` makes each plan action usable
+        at most once.
+
+    `arguments` stores a redacted copy for operator review; authorization is
+    decided by `arguments_sha256` over the canonical, validated arguments.
+    """
+
+    __tablename__ = "mcp_action_approvals"
+
+    id = Column(UUID(as_uuid=False), primary_key=True, default=gen_uuid)
+    source = Column(String(32), nullable=False)  # mcp_request | incident_plan
+    grant_key = Column(String(256), unique=True, nullable=True)
+    tool_name = Column(String(128), nullable=False, index=True)
+    arguments = Column(JSON, nullable=False, default=dict)
+    arguments_sha256 = Column(String(64), nullable=False)
+    status = Column(String(16), nullable=False, default="PENDING")  # PENDING/APPROVED/REJECTED/CONSUMED
+    incident_id = Column(UUID(as_uuid=False), nullable=True, index=True)
+    correlation_id = Column(String(64), nullable=True)
+    requested_by = Column(String(128), nullable=True)
+    requested_at = Column(DateTime, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False)
+    decided_at = Column(DateTime, nullable=True)
+    decided_by = Column(String(128), nullable=True)
+    reason = Column(Text, nullable=True)
+    consumed_at = Column(DateTime, nullable=True)
+
+
 class SchemaVersion(Base):
     __tablename__ = "schema_versions"
 

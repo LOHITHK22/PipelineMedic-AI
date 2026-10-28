@@ -5,7 +5,7 @@ from __future__ import annotations
 from app.agents.correlation import find_correlated_events
 from app.db.base import SessionLocal
 from app.models.schemas import Incident, IncidentType
-from app.tools.registry import invoke_tool
+from app.agents.tool_transport import invoke_tool  # registry (default) or MCP, per AGENT_TOOL_TRANSPORT
 
 
 def collect_context(incident: Incident) -> dict:

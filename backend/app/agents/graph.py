@@ -39,8 +39,8 @@ from app.observability.metrics import (
 from app.policies.engine import assess_risk
 from app.services.approval_tokens import generate_approval_token
 from app.services.notifications import get_notification_service
+from app.agents.tool_transport import invoke_tool  # registry (default) or MCP, per AGENT_TOOL_TRANSPORT
 from app.tools.base import ToolPermissionError
-from app.tools.registry import invoke_tool
 
 logger = logging.getLogger("pipelinemedic.agent")
 

@@ -13,6 +13,13 @@ os.environ.setdefault(
 from app.db.base import Base, apply_lightweight_schema_patches, engine  # noqa: E402
 
 
+def pytest_configure(config):
+    # Test categories for the MCP integration (see app/tests/test_mcp_server.py).
+    config.addinivalue_line("markers", "mcp_protocol: MCP protocol tests via the official SDK client (in-process transport)")
+    config.addinivalue_line("markers", "mcp_stdio: MCP tests that launch the real server subprocess over stdio")
+    config.addinivalue_line("markers", "infra: tests that need real Postgres (DATABASE_URL); skipped when unreachable")
+
+
 def _db_available() -> bool:
     try:
         with engine.connect():
