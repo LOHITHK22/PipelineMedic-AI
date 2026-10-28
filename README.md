@@ -7,7 +7,7 @@ consumer lag, Airflow task failures), asks a structured-output LLM to
 diagnose root cause and propose a typed repair plan, scores the plan's risk
 with a deterministic policy engine, auto-executes low-risk repairs or pauses
 for durable human approval on medium/high risk ones, executes repairs
-through typed MCP-style tools, independently validates recovery, rolls back
+through typed tools (also served over a real MCP server), independently validates recovery, rolls back
 on failure, and records everything to a full Postgres audit trail.
 
 ```mermaid
@@ -28,7 +28,7 @@ flowchart LR
         POL -->|"LOW risk"| EXE["Execute tools"]
         POL -->|"MED/HIGH risk"| APR["Persisted ApprovalRequest"]
         APR -->|"human approves via API"| EXE
-        EXE --> TOOLS["MCP-style tools"]
+        EXE --> TOOLS["Typed tools<br/>(registry or MCP)"]
         TOOLS --> VAL["Validate"]
         VAL -->|"healthy"| RES["Resolved"]
         VAL -->|"unhealthy"| RB["Rollback"]
@@ -51,12 +51,14 @@ flowchart LR
 - **Incident memory & event correlation** — similar past incidents and preceding system events inform (never override) diagnosis
 - **Cost protection** — LLM invocation/token tracking with duplicate-incident deduplication
 - **Notifications & Q&A** — console/SMTP alerts on new incidents, plus a plain-English "ask about this incident" box grounded in the real diagnosis
-- **React + TypeScript dashboard** and a **22-tool MCP-style registry** enforcing typed, audited, permissioned execution
+- **React + TypeScript dashboard** and a **typed tool registry** (17 executable tools + 5 permanently blocked destructive operations) enforcing typed, audited, permissioned execution
+- **Standards-compliant MCP server** (official MCP Python SDK v2, stdio) exposing those tools to MCP Inspector / Claude Desktop / Cursor, with server-side policy enforcement and persisted, single-use human approvals — see [MCP server](#mcp-server)
 
 ## Table of contents
 
 - [What's real vs. what's documented-as-limitation](#whats-real-vs-whats-documented-as-limitation)
 - [Quick start](#quick-start)
+- [MCP server](#mcp-server)
 - [API surface](#api-surface)
 - [Dashboard](#dashboard)
 - [Repository layout](#repository-layout)
@@ -88,7 +90,10 @@ Everything below was actually executed, not just written:
   independently validated, and marked `RESOLVED` -- end to end, against
   real Kafka and Postgres, not mocked.
 - `/metrics` (Prometheus) reflects real counters incremented by that run.
-- 50/50 pytest tests pass, including true DB-backed end-to-end tests
+- The full pytest suite (121 tests, including the 63 MCP tests) passes when
+  run against real Postgres and Kafka (see [MCP server](#mcp-server) for the
+  exact command); without Postgres the DB-backed tests are skipped. This
+  includes true DB-backed end-to-end tests
   (`backend/app/tests/test_e2e.py`, `backend/app/tests/test_advanced_features.py`)
   exercising the full lifecycle described above, plus event correlation,
   canary remediation, and LLM cost protection (see below), via the same
@@ -170,6 +175,93 @@ Postgres is published on host port **5433** (not 5432) to avoid colliding
 with any local Postgres install; inside the Docker network services still
 use the standard `postgres:5432`.
 
+## MCP server
+
+The same typed tools the agent uses are exposed over the **Model Context
+Protocol** by `backend/app/mcp_server.py`. It uses the official MCP Python
+SDK `mcp` 2.3.0 (`MCPServer`) over the stdio transport, and negotiates
+protocol versions 2024-11-05 through 2026-07-28. Any MCP client can discover
+the tools, inspect their JSON schemas (the existing Pydantic models) and call
+them. Full details are in [`docs/mcp-tools.md`](docs/mcp-tools.md).
+
+```mermaid
+flowchart LR
+    C["AI client<br/>(MCP Inspector, Claude Desktop,<br/>Cursor, PipelineMedic agent)"] -->|"stdio JSON-RPC"| S["MCP server<br/>app/mcp_server.py"]
+    S --> P["Authorization and policy enforcement<br/>hard-block · arg validation · policy engine<br/>· persisted approval check · audit + redaction"]
+    P --> R["Existing tool registry<br/>app/tools/*"]
+    R --> K[("Kafka")]
+    R --> F["Flink"]
+    R --> A["Airflow"]
+    R --> PG[("PostgreSQL")]
+    O["Operator CLI<br/>app.services.mcp_approvals"] -.->|"approve / reject"| P
+```
+
+**Before:** risk and approval were enforced only by the agent graph, and the
+registry was called solely by the agent. **After:** an external MCP client
+never passes through the agent graph, so the MCP server enforces
+authorization itself on every call:
+
+- **Read-only tools only by default.** The 10 diagnostics are listed. The 7
+  state-changing tools are hidden and refused unless
+  `MCP_ALLOW_STATE_CHANGING_TOOLS=true`.
+- **MEDIUM-risk tools need a server-verified human approval.** The tools are
+  `restart_flink_job`, `change_flink_parallelism`, `rerun_airflow_task`,
+  `apply_safe_config_patch` and `rollback_change`. The approval is either
+  operator-approved through the CLI (single-use, bound to the tool and a
+  SHA-256 of the exact arguments, expiring), or an action from an incident plan
+  a human already approved in the existing workflow. No MCP tool can approve
+  anything.
+- **The 5 destructive operations are never registered.**
+  `drop_database_table`, `truncate_topic`, `delete_dag`, `run_arbitrary_sql`
+  and `run_shell_command`. The server refuses to start if one ever appears in
+  the registry.
+- **Raw arguments are validated in the server.** Unknown keys, identifier
+  syntax and size are checked, then the tool's own Pydantic model validates.
+  Identifier fields interpolated into Flink/Airflow URL paths reject
+  traversal such as `dag_id="x/../../config"`.
+- **Every call is audited and redacted.** Each call writes exactly one
+  `audit_log` row (status, duration, correlation/incident ID, risk, approval,
+  validation, error category), increments Prometheus metrics and writes one
+  stderr JSON log line. Credentials are redacted from results and audit data.
+
+```bash
+cd backend
+python -m app.mcp_server                                      # stdio server (read-only tools)
+python -m app.services.mcp_approvals list                     # operator: pending approval requests
+python -m app.services.mcp_approvals approve <id> --by <name> # operator: approve one request
+npx -y @modelcontextprotocol/inspector@2.10.1 --cli --config ../docs/mcp-inspector.example.json \
+    --server pipelinemedic --method tools/list                # external client check
+```
+
+**Agent integration.** Set `AGENT_TOOL_TRANSPORT=mcp` (the default is
+`registry`, which is unchanged) to make the agent run its context collection,
+repairs, validation and rollback through the MCP server, under the same
+gateway. MCP failures never fall back to the in-process registry.
+
+**Tests.** `backend/app/tests/test_mcp_server.py` has 63 tests in three categories:
+- `-m mcp_protocol`: the SDK client over the in-process transport.
+- `-m mcp_stdio`: the real server subprocess.
+- `-m infra`: the full agent graph on Postgres.
+
+The `infra` tests use the existing `clean_db` fixture, which truncates every
+table, so point `DATABASE_URL` at a disposable database:
+
+```bash
+cd backend
+DATABASE_URL=postgresql+psycopg2://pipelinemedic:pipelinemedic@localhost:55432/pipelinemedic \
+KAFKA_BOOTSTRAP_SERVERS=localhost:9092 python -m pytest app/tests
+```
+
+**Verified:**
+- MCP Inspector 2.10.1 (CLI mode): discovery, schemas, real Kafka diagnostic
+  calls, rejected calls, and a complete request → approve → execute → replay-
+  rejected approval flow.
+- The server running inside the Linux backend image.
+
+**Not verified:** Claude Desktop, Cursor and Claude Code (example configs are
+provided in `docs/mcp-tools.md`). There is no Streamable HTTP endpoint
+(stdio only, by design). See [`docs/mcp-tools.md`](docs/mcp-tools.md#known-limitations).
+
 ## API surface
 
 - `GET /health`, `GET /metrics`, `GET /` (status page)
@@ -184,7 +276,7 @@ use the standard `postgres:5432`.
 - `POST /incidents/{id}/approve`, `POST /incidents/{id}/reject`
 - `GET /approvals`
 - `GET /audit` (chronological SYSTEM/AGENT/HUMAN audit trail)
-- `GET /tools` (MCP-style tool catalog with risk levels and JSON schemas)
+- `GET /tools` (tool catalog with risk levels and JSON schemas; the same tools are served over MCP -- see [MCP server](#mcp-server))
 - `GET /metrics/llm-usage` — LLM invocation/token-estimate audit trail plus how many calls were skipped via duplicate-incident deduplication (see `docs/safety-model.md` "Cost protection")
 - `GET /approve-link/{token}` — read-only lookup of a signed, single-use, time-limited approve-link token: returns the incident summary/diagnosis/plan without deciding anything, or `{valid: false, error: "expired"|"invalid"|"already_used"|"already_decided"}` (see `docs/safety-model.md` "Approve-link security model")
 - `POST /approve-link/{token}/decide` — `{decision: "approve"|"reject", reason?}`; validates + consumes the token, then calls the exact same service-layer approve/reject logic as `POST /incidents/{id}/approve`/`reject`
@@ -235,7 +327,8 @@ backend/app/
   detectors/    deterministic detectors (schema drift, lag, airflow, flink, data quality)
   models/       shared Pydantic schemas (Incident, DiagnosisResult, RepairPlan, ...)
   services/     pipeline_monitor.py (background detection + Flink fallback)
-  tools/        MCP-style typed tools + registry + hard-blocked CRITICAL tools
+  tools/        typed tools + registry + hard-blocked CRITICAL tools
+  mcp_server.py MCP server (official SDK, stdio) + server-side policy gateway
   policies/     autonomy_policy.yaml + policy engine
   db/           SQLAlchemy models
   llm/          provider abstraction (mock / openai / azure_openai)

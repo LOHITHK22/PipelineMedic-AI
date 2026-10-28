@@ -1,16 +1,12 @@
-"""MCP-style typed tool abstraction.
+"""Typed tool abstraction (typed input schema, structured typed result,
+audited execution, declared risk/permission tier) as plain Python classes.
 
-We mirror MCP tool semantics (typed input schema, structured typed result,
-audited execution, declared risk/permission tier) as plain Python classes
-rather than wiring the actual MCP wire protocol. Rationale documented in
-docs/mcp-tools.md: within this session, a genuine MCP client/server handshake
-(stdio or SSE transport, tool discovery, JSON-RPC framing) adds real
-integration surface without changing the actual safety or behavior story --
-the important properties are typed inputs, typed outputs, permission
-enforcement, and audit logging, all of which this abstraction provides and
-enforces identically to how an MCP tool call would be enforced by the calling
-agent. Swapping this for a real MCP server later only touches
-app/tools/registry.py.
+These classes are the single implementation of every tool. The agent calls
+them in-process through app/tools/registry.py, and app/mcp_server.py exposes
+the same classes over the real MCP protocol (official Python SDK, stdio):
+each `input_model`/`output_model` becomes the MCP inputSchema/outputSchema
+and `run()` is the handler, behind a server-side policy gateway. See
+docs/mcp-tools.md.
 """
 from __future__ import annotations
 

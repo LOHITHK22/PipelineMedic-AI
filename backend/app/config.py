@@ -72,5 +72,26 @@ class Settings(BaseSettings):
     # non-local deployments.
     dashboard_base_url: str = "http://localhost:5173"
 
+    # MCP server (see backend/app/mcp_server.py, docs/mcp-tools.md)
+    # Read-only diagnostic tools are always exposed. State-changing tools
+    # (anything not in mcp_server.READ_ONLY_TOOLS) are neither listed nor
+    # callable unless this is explicitly enabled; even then, MEDIUM/HIGH risk
+    # tools still require a persisted, server-verified human approval.
+    mcp_allow_state_changing_tools: bool = False
+    # How long a pending/approved MCP action approval stays usable.
+    mcp_approval_ttl_seconds: int = 900  # 15 minutes
+    # Optional: expose the MCP server process's own Prometheus metrics on this
+    # port (the MCP server is a separate process from the FastAPI app, so its
+    # counters are not visible on the backend's /metrics). Unset = disabled.
+    mcp_metrics_port: int | None = None
+
+    # Agent tool-execution pathway (see backend/app/agents/tool_transport.py).
+    # "registry" (default): the agent calls app.tools.registry.invoke_tool
+    # in-process, exactly as before. "mcp": the agent calls tools through the
+    # MCP server over stdio, subject to the same server-side policy gateway as
+    # any external MCP client. An MCP failure never falls back to "registry".
+    agent_tool_transport: str = "registry"  # registry | mcp
+    mcp_client_timeout_seconds: float = 60.0
+
 
 settings = Settings()

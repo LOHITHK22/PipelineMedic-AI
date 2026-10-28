@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "pipelinemedic": {
+      "command": "python",
+      "args": ["-m", "app.mcp_server"],
+      "env": {
+        "PYTHONPATH": ".",
+        "DATABASE_URL": "postgresql+psycopg2://pipelinemedic:pipelinemedic@localhost:5433/pipelinemedic",
+        "KAFKA_BOOTSTRAP_SERVERS": "localhost:9094",
+        "FLINK_JOBMANAGER_URL": "http://localhost:8081",
+        "AIRFLOW_BASE_URL": "http://localhost:8080",
+        "MCP_ALLOW_STATE_CHANGING_TOOLS": "false"
+      }
+    }
+  }
+}

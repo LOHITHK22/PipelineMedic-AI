@@ -26,3 +26,11 @@ LLM_ESTIMATED_TOKENS_TOTAL = Counter(
 CANARY_STARTED_TOTAL = Counter("canary_started_total", "Total canary-scoped repairs started")
 CANARY_VALIDATION_PASSED_TOTAL = Counter("canary_validation_passed_total", "Total canary validations that passed")
 CANARY_VALIDATION_FAILED_TOTAL = Counter("canary_validation_failed_total", "Total canary validations that failed (triggered rollback)")
+
+# MCP server metrics (see app.mcp_server). Recorded in the MCP server process.
+MCP_TOOL_CALLS_TOTAL = Counter(
+    "mcp_tool_calls_total", "Total MCP tool calls by outcome", ["tool", "outcome"]
+)
+MCP_TOOL_CALL_DURATION = Histogram(
+    "mcp_tool_call_duration_seconds", "MCP tool call duration (policy + execution)", ["tool"]
+)
