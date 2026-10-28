@@ -62,7 +62,6 @@ flowchart LR
 - [API surface](#api-surface)
 - [Dashboard](#dashboard)
 - [Repository layout](#repository-layout)
-- [Interview talking points](#interview-talking-points)
 
 ## What's real vs. what's documented-as-limitation
 
@@ -339,15 +338,5 @@ producer/       Kafka order-event producer with fault-injection scenarios
 flink/jobs/     real PyFlink job (see limitations)
 airflow/dags/   real Airflow DAG
 scripts/        fault injection + reset scripts
-docs/           architecture, agent design, MCP tools, safety model, demo, interview guide
+docs/           architecture, agent design, MCP tools, safety model, demo
 ```
-
-## Interview talking points
-
-See `docs/interview-guide.md` for full answers on: why Kafka/Flink, why
-deterministic detection before LLM, why LangGraph-style state (and why this
-repo hand-rolls it instead), why MCP-style tools, hallucination control, why
-human approval, rollback mechanics, idempotency, scaling to 1000 pipelines,
-Kubernetes deployment, credential security, preventing agent-caused
-outages, LLM unavailability fallback, schema registry integration, and
-extensibility to Databricks/Spark/Snowflake.

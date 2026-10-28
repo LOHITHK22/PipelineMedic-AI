@@ -204,5 +204,4 @@ a new LLM chat integration and **not** a new agentic action surface:
   plan contents, plan diffing against historical plans, etc.).
 - Credential compromise of the tool-calling identity itself (e.g. the
   backend's own Kafka/Airflow/DB credentials). Standard least-privilege
-  service-account scoping applies; see `docs/interview-guide.md` "credential
-  security".
+  service-account scoping applies.
